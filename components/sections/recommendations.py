@@ -1,6 +1,6 @@
 import streamlit as st
 import pandas as pd
-from data_preprocessing_studio.utils.recommendations import PreprocessingRecommendations
+from utils.recommendations import PreprocessingRecommendations
 
 def section_recommendations():
     st.header("Recommendations")
@@ -110,4 +110,5 @@ def section_recommendations():
                         st.success("Added auto pipeline steps.")
 
     except Exception as e:
+
         st.error(f"Error generating recommendations: {e}")
