@@ -1,10 +1,10 @@
 import logging
 import streamlit as st
 import time
-from data_preprocessing_studio.utils.data_utils import dtype_split, _arrowize, sample_for_preview
-from data_preprocessing_studio.utils.viz_utils import alt_histogram
-from data_preprocessing_studio.preprocessing.pipeline import run_pipeline
-from data_preprocessing_studio.session import push_history
+from utils.data_utils import dtype_split, _arrowize, sample_for_preview
+from utils.viz_utils import alt_histogram
+from preprocessing.pipeline import run_pipeline
+from session import push_history
 
 logger = logging.getLogger(__name__)
 
