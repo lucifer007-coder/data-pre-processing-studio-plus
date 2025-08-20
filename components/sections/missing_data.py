@@ -1,8 +1,8 @@
 import logging
 import streamlit as st
 import pandas as pd
-from data_preprocessing_studio.utils.data_utils import dtype_split, _arrowize, sample_for_preview
-from data_preprocessing_studio.preprocessing.steps import impute_missing, drop_missing
+from utils.data_utils import dtype_split, _arrowize, sample_for_preview
+from preprocessing.steps import impute_missing, drop_missing
 
 logger = logging.getLogger(__name__)
 
