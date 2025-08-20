@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 from typing import Dict, Any, Optional
 import streamlit as st
-from .data_utils import dtype_split
+from data_utils import dtype_split
 
 logger = logging.getLogger(__name__)
 
