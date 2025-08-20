@@ -1,5 +1,5 @@
 import streamlit as st
-from data_preprocessing_studio.session import reset_all, undo_last
+from session import reset_all, undo_last
 
 def sidebar_navigation() -> str:
     st.sidebar.image(
