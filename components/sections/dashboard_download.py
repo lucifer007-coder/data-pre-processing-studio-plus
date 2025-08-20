@@ -5,7 +5,7 @@ import io
 import numpy as np
 from scipy import stats
 from utils.stats_utils import compute_basic_stats, compare_stats
-from tils.viz_utils import alt_histogram
+from utils.viz_utils import alt_histogram
 from utils.recommendations import PreprocessingRecommendations
 
 def section_dashboard_download():
