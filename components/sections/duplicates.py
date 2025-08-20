@@ -1,7 +1,7 @@
 import logging
 import streamlit as st
-from data_preprocessing_studio.utils.data_utils import _arrowize, sample_for_preview
-from data_preprocessing_studio.preprocessing.steps import remove_duplicates
+from utils.data_utils import _arrowize, sample_for_preview
+from preprocessing.steps import remove_duplicates
 
 logger = logging.getLogger(__name__)
 
