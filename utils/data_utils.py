@@ -1,7 +1,7 @@
 import pandas as pd
 import numpy as np
 from typing import List, Tuple
-from ..config import RANDOM_STATE, PREVIEW_ROWS
+from config import RANDOM_STATE, PREVIEW_ROWS
 
 def _arrowize(df: pd.DataFrame) -> pd.DataFrame:
     """
