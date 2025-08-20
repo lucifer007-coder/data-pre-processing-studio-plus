@@ -1,8 +1,8 @@
 import logging
 import streamlit as st
 import pandas as pd
-from data_preprocessing_studio.utils.data_utils import _arrowize, sample_for_preview
-from data_preprocessing_studio.session import init_session
+from utils.data_utils import _arrowize, sample_for_preview
+from session import init_session
 
 logger = logging.getLogger(__name__)
 
