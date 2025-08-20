@@ -1,7 +1,7 @@
 import logging
 from typing import List, Tuple, Dict, Any
 import pandas as pd
-from data_preprocessing_studio.preprocessing.steps import (
+from preprocessing.steps import (
     impute_missing,
     drop_missing,
     normalize_text,
