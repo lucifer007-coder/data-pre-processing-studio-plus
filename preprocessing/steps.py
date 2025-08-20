@@ -4,7 +4,7 @@ import numpy as np
 from typing import List, Tuple, Optional, Any
 from sklearn.preprocessing import StandardScaler, MinMaxScaler, LabelEncoder
 import regex as re
-from ..utils.data_utils import dtype_split
+from utils.data_utils import dtype_split
 
 logger = logging.getLogger(__name__)
 
