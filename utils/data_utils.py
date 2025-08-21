@@ -5,53 +5,59 @@ from config import RANDOM_STATE, PREVIEW_ROWS
 
 def _arrowize(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Return a *shallow* copy of `df` whose column dtypes are guaranteed to
-    serialize to Arrow without raising ArrowInvalid.
+    Return a *shallow* copy whose dtypes are:
+      - pyarrow-backed string[pyarrow] for object columns
+      - numeric down-casted
     """
     if df is None or df.empty:
         return df
 
     df_out = df.copy()
+
+    # 1. Force pyarrow-backed dtypes
     for col in df_out.columns:
         s = df_out[col]
         inferred = pd.api.types.infer_dtype(s, skipna=True)
 
-        # CASE 1: numeric column that slipped into 'object' dtype
-        # (usually because of strings such as 'NA', 'NULL', etc.)
+        # numeric slipped into object
         if inferred in ("mixed", "string", "mixed-integer"):
-            # Try to parse as float; unparseable values become NaN
             parsed = pd.to_numeric(s, errors="coerce")
-            # If at least one value survived, cast the column
             if parsed.notna().any():
                 df_out[col] = parsed.astype("float64")
             else:
-                # Fallback: plain string
-                df_out[col] = s.astype(str)
+                df_out[col] = s.astype("string[pyarrow]")
 
-        # CASE 2: Boolean columns might be "True"/"False" strings
+        # boolean strings
         elif inferred == "boolean":
             df_out[col] = s.astype(bool)
 
-        # CASE 3: Everything else is kept as-is
-        else:
-            pass
+        # already numeric → down-cast
+        elif pd.api.types.is_integer_dtype(s):
+            df_out[col] = pd.to_numeric(s, downcast="integer")
+        elif pd.api.types.is_float_dtype(s):
+            df_out[col] = pd.to_numeric(s, downcast="float")
 
-    return df_out
+        # everything else → pyarrow string
+        elif s.dtype == "object":
+            df_out[col] = s.astype("string[pyarrow]")
+
+    return df_out.convert_dtypes(dtype_backend="pyarrow")
+
 
 def sample_for_preview(df: pd.DataFrame, n: int = PREVIEW_ROWS) -> pd.DataFrame:
-    """Safely sample DataFrame for preview purposes."""
+    """Return at most `n` rows (or full frame) for safe preview."""
     try:
         if df is None or df.empty:
             return df
         if len(df) <= n:
             return df.copy()
         return df.sample(n=n, random_state=RANDOM_STATE).copy()
-    except Exception as e:
-        logger.error(f"Error in sample_for_preview: {e}")
+    except Exception:
         return df if df is not None else pd.DataFrame()
 
+
 def dtype_split(df: pd.DataFrame) -> Tuple[List[str], List[str]]:
-    """Return (numeric_columns, categorical_columns)."""
+    """Return (numeric_columns, categorical_columns) using pyarrow dtypes."""
     if not isinstance(df, pd.DataFrame):
         raise TypeError("Input must be a pandas DataFrame")
     numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
