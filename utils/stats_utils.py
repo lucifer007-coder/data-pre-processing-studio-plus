@@ -3,13 +3,23 @@ import pandas as pd
 import numpy as np
 from typing import Dict, Any, Optional
 import streamlit as st
-from utils.data_utils import dtype_split
+from data_utils import dtype_split
 
 logger = logging.getLogger(__name__)
 
-@st.cache_data
+# ------------------------------------------------------------------
+# 1.  Aggressive caching (hash by DataFrame id + shape + dtypes)
+# ------------------------------------------------------------------
+@st.cache_data(
+    show_spinner="Computing stats …",
+    ttl=600,                     # 10-minute cache lifetime
+    max_entries=3                # keep at most 3 DataFrame fingerprints
+)
 def compute_basic_stats(df: Optional[pd.DataFrame]) -> Dict[str, Any]:
-    """Compute comprehensive basic statistics for a DataFrame."""
+    """
+    Return comprehensive statistics for a DataFrame.
+    Cached per DataFrame identity + shape + dtypes to avoid recomputation.
+    """
     if df is None:
         logger.warning("DataFrame is None, returning empty statistics")
         return {
@@ -32,24 +42,31 @@ def compute_basic_stats(df: Optional[pd.DataFrame]) -> Dict[str, Any]:
 
     try:
         num_cols, cat_cols = dtype_split(df)
+
+        # --- Missing counts --------------------------------------------------
         missing_series = df.isna().sum()
         missing_total = int(missing_series.sum())
-        missing_by_col = {k: int(v) for k, v in missing_series.sort_values(ascending=False).to_dict().items()}
+        missing_by_col = {
+            k: int(v) for k, v in missing_series.sort_values(ascending=False).items()
+        }
 
+        # --- Numeric describe (sample if > 1 M rows) -------------------------
         describe_numeric = {}
         if num_cols:
             numeric_df = df[num_cols]
             if len(numeric_df) > 1_000_000:
                 numeric_df = numeric_df.sample(n=min(100_000, len(numeric_df)), random_state=42)
-            describe_numeric = numeric_df.describe().to_dict()
-            for col in describe_numeric:
-                for stat in describe_numeric[col]:
-                    val = describe_numeric[col][stat]
+            desc = numeric_df.describe()
+            describe_numeric = desc.to_dict()
+            # Convert numpy scalars → Python floats
+            for col, stats in describe_numeric.items():
+                for stat_name, val in stats.items():
                     if pd.isna(val):
-                        describe_numeric[col][stat] = None
-                    elif isinstance(val, (np.integer, np.floating)):
-                        describe_numeric[col][stat] = float(val) if np.isfinite(val) else None
+                        describe_numeric[col][stat_name] = None
+                    else:
+                        describe_numeric[col][stat_name] = float(val)
 
+        # --- Memory footprint -------------------------------------------------
         memory_usage_mb = round(float(df.memory_usage(deep=True).sum() / (1024 * 1024)), 2)
         duplicate_rows = int(df.duplicated().sum())
 
@@ -63,8 +80,9 @@ def compute_basic_stats(df: Optional[pd.DataFrame]) -> Dict[str, Any]:
             "categorical_cols": cat_cols,
             "describe_numeric": describe_numeric,
             "memory_usage_mb": memory_usage_mb,
-            "duplicate_rows": duplicate_rows
+            "duplicate_rows": duplicate_rows,
         }
+
     except Exception as e:
         logger.error(f"Unexpected error in compute_basic_stats: {e}")
         return {
@@ -78,10 +96,16 @@ def compute_basic_stats(df: Optional[pd.DataFrame]) -> Dict[str, Any]:
             "describe_numeric": {},
             "memory_usage_mb": 0.0,
             "duplicate_rows": 0,
-            "error": str(e)
+            "error": str(e),
         }
 
-def compare_stats(before: Optional[Dict[str, Any]], after: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+
+# ------------------------------------------------------------------
+# 2.  Cached compare_stats as well
+# ------------------------------------------------------------------
+@st.cache_data(show_spinner="Comparing stats …", ttl=600)
+def compare_stats(before: Optional[Dict[str, Any]],
+                  after: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """Compare statistics between two DataFrames (before and after processing)."""
     if before is None:
         before = {}
@@ -127,6 +151,7 @@ def compare_stats(before: Optional[Dict[str, Any]], after: Optional[Dict[str, An
             "added_columns": added_columns,
             "removed_columns": removed_columns,
         }
+
     except Exception as e:
         logger.error(f"Error in compare_stats: {e}")
         st.error(f"Error comparing statistics: {e}")
@@ -144,5 +169,5 @@ def compare_stats(before: Optional[Dict[str, Any]], after: Optional[Dict[str, An
             "n_columns_after": 0,
             "added_columns": [],
             "removed_columns": [],
-            "error": str(e)
+            "error": str(e),
         }
