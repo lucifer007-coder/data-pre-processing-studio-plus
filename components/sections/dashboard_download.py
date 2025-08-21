@@ -2,7 +2,6 @@ import streamlit as st
 import pandas as pd
 import altair as alt
 import io
-import json
 import numpy as np
 from scipy import stats
 from utils.stats_utils import compute_basic_stats
@@ -10,14 +9,16 @@ from utils.viz_utils import alt_histogram
 from utils.recommendations import PreprocessingRecommendations
 
 
-# ----------------------------------------------------------
-# Helper: lightweight compare_stats (no circular import)
-# ----------------------------------------------------------
+# ------------------------------------------------------------------
+# Helper: local lightweight compare_stats (avoids circular imports)
+# ------------------------------------------------------------------
 def compare_stats(before, after) -> dict:
+    """Lightweight version of utils.stats_utils.compare_stats for local use."""
     if not isinstance(before, dict):
         before = {}
     if not isinstance(after, dict):
         after = {}
+
     shape_before = before.get("shape", (0, 0))
     shape_after = after.get("shape", (0, 0))
     missing_before = before.get("missing_total", 0)
@@ -50,9 +51,9 @@ def compare_stats(before, after) -> dict:
     }
 
 
-# ----------------------------------------------------------
+# ------------------------------------------------------------------
 # Main dashboard section
-# ----------------------------------------------------------
+# ------------------------------------------------------------------
 def section_dashboard_download():
     st.header("📊 Dashboard & Download")
     df = st.session_state.df
@@ -62,11 +63,12 @@ def section_dashboard_download():
         return
 
     try:
+        # ── 0. Compute once, reuse everywhere -------------------------
         raw_stats   = compute_basic_stats(raw)
         after_stats = compute_basic_stats(df)
         comp = compare_stats(raw_stats, after_stats)
 
-        # ── 1. Data Quality Scorecard -----------------------------
+        # ── 1. Data Quality Scorecard --------------------------------
         st.subheader("Data Quality Scorecard")
         recommender = PreprocessingRecommendations()
         recommendations = recommender.analyze_dataset(df)
@@ -87,7 +89,7 @@ def section_dashboard_download():
                     if chart:
                         st.altair_chart(chart, use_container_width=True)
 
-        # ── 2. AI Bias Detection ----------------------------------
+        # ── 2. AI Bias Detection -------------------------------------
         st.subheader("AI Bias Detection")
         cat_cols = after_stats["categorical_cols"]
         if cat_cols:
@@ -112,7 +114,7 @@ def section_dashboard_download():
         else:
             st.info("No categorical columns for bias analysis.")
 
-        # ── 3. Correlation Analysis -------------------------------
+        # ── 3. Correlation Analysis ----------------------------------
         st.subheader("Correlation Analysis")
         num_cols = after_stats["numeric_cols"]
         if num_cols:
@@ -132,7 +134,7 @@ def section_dashboard_download():
         else:
             st.info("No numeric columns for correlation analysis.")
 
-        # ── 4. Before / After Comparison --------------------------
+        # ── 4. Before / After Comparison -----------------------------
         st.subheader("Before/After Transformations")
         col1, col2 = st.columns(2)
         with col1:
@@ -152,7 +154,7 @@ def section_dashboard_download():
         with c4:
             st.metric("Memory (MB)", f"{after_stats.get('memory_usage_mb', 0):.2f}")
 
-        # ── 5. Statistical Test Results ---------------------------
+        # ── 5. Statistical Test Results ------------------------------
         st.subheader("Statistical Test Results")
         if num_cols:
             for col in num_cols[:3]:
@@ -169,7 +171,7 @@ def section_dashboard_download():
         else:
             st.info("No numeric columns for statistical tests.")
 
-        # ── 6. Anomaly Detection Heatmap --------------------------
+        # ── 6. Anomaly Detection Heatmap -----------------------------
         st.subheader("Anomaly Detection Heatmap")
         if num_cols:
             z_scores = pd.DataFrame(index=df.index)
@@ -197,7 +199,7 @@ def section_dashboard_download():
         else:
             st.info("No numeric columns for anomaly detection.")
 
-        # ── 7. Dashboard Tabs -------------------------------------
+        # ── 7. Dashboard Tabs ---------------------------------------
         t1, t2, t3 = st.tabs(["Summary", "Distributions", "Change Log"])
         with t1:
             # Added / Removed columns
@@ -206,7 +208,7 @@ def section_dashboard_download():
             if comp.get("removed_columns"):
                 st.warning(f"Removed columns: {', '.join(comp['removed_columns'])}")
 
-            # Missing values
+            # Missing values table
             st.subheader("Missing by Column (After)")
             miss_after = pd.Series(after_stats["missing_by_col"])
             if miss_after.sum() > 0:
@@ -225,6 +227,7 @@ def section_dashboard_download():
             )
             before_num = raw_stats.get("describe_numeric", {})
             after_num  = after_stats.get("describe_numeric", {})
+
             impacts = []
             for col in after_num:
                 if col in before_num:
@@ -248,7 +251,7 @@ def section_dashboard_download():
             else:
                 st.info("No numeric columns to compare.")
 
-            # dtypes & numeric describe
+            # dtypes & numeric describe expanders
             with st.expander("Dtypes (After)"):
                 st.json(after_stats["dtypes"])
             with st.expander("Numeric Describe (After)"):
@@ -290,7 +293,7 @@ def section_dashboard_download():
                 for i, msg in enumerate(st.session_state.changelog, start=1):
                     st.write(f"{i}. {msg}")
 
-        # ── 8. Download section (CSV only) ------------------------
+        # ── 8. Download section ------------------------------------
         st.markdown("---")
         st.subheader("Download Processed Data")
         buf = io.StringIO()
