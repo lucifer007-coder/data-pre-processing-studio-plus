@@ -21,7 +21,7 @@ def section_dashboard_download():
         after_stats = compute_basic_stats(df)
         comp = compare_stats(before_stats, after_stats)
 
-        # Recommendations Scorecard
+        # 1. Recommendations Scorecard
         st.subheader("Data Quality Scorecard")
         recommender = PreprocessingRecommendations()
         recommendations = recommender.analyze_dataset(df)
@@ -38,7 +38,7 @@ def section_dashboard_download():
                     if 'count' in rec:
                         st.write(f"**Outlier Count**: {rec['count']}")
 
-        # AI Bias Detection Visuals
+        # 2. AI Bias Detection Visuals
         st.subheader("AI Bias Detection")
         cat_cols = after_stats["categorical_cols"]
         if cat_cols:
@@ -66,7 +66,7 @@ def section_dashboard_download():
         else:
             st.info("No categorical columns for bias analysis.")
 
-        # Correlation Analysis
+        # 3. Correlation Analysis
         st.subheader("Correlation Analysis")
         num_cols = after_stats["numeric_cols"]
         if num_cols:
@@ -86,7 +86,7 @@ def section_dashboard_download():
         else:
             st.info("No numeric columns for correlation analysis.")
 
-        # Before/After Comparisons
+        # 4. Before/After Comparisons
         st.subheader("Before/After Transformations")
         col1, col2 = st.columns(2)
         with col1:
@@ -105,12 +105,12 @@ def section_dashboard_download():
         with c4:
             st.metric("Memory (MB)", f"{after_stats.get('memory_usage_mb', 0):.2f}")
 
-        # Statistical Test Results
+        # 5. Statistical Test Results
         st.subheader("Statistical Test Results")
         if num_cols:
-            for col in num_cols[:3]:  # Limit to 3 for brevity
+            for col in num_cols[:3]:
                 clean_series = df[col].dropna()
-                if len(clean_series) < 3:  # Shapiro-Wilk requires at least 3 samples
+                if len(clean_series) < 3:
                     st.info(f"Skipping Shapiro-Wilk test for {col}: insufficient non-NaN values.")
                     continue
                 stat, p_value = stats.shapiro(clean_series)
@@ -118,17 +118,17 @@ def section_dashboard_download():
                 if p_value < 0.05:
                     st.warning(f"{col} is not normally distributed (p < 0.05).")
                 else:
-                    st.info(f"{col} appears normally distributed (p >= 0.05).")
+                    st.info(f"{col} appears normally distributed (p ≥ 0.05).")
         else:
             st.info("No numeric columns for statistical tests.")
 
-        # Anomaly Detection Heatmap
+        # 6. Anomaly Detection Heatmap
         st.subheader("Anomaly Detection Heatmap")
         if num_cols:
             z_scores = pd.DataFrame(index=df.index)
             for col in num_cols:
                 clean_series = df[col].dropna()
-                if len(clean_series) < 2:  # Z-score requires at least 2 values
+                if len(clean_series) < 2:
                     z_scores[col] = 0
                     continue
                 z_values = np.abs(stats.zscore(clean_series))
@@ -150,7 +150,7 @@ def section_dashboard_download():
         else:
             st.info("No numeric columns for anomaly detection.")
 
-        # Existing Dashboard Tabs
+        # Existing Dashboard Tabs with Pagination in Summary
         t1, t2, t3 = st.tabs(["Summary", "Distributions", "Change Log"])
         with t1:
             if comp.get('added_columns'):
@@ -163,6 +163,16 @@ def section_dashboard_download():
                 st.dataframe(miss_after[miss_after > 0].rename("missing_count"))
             else:
                 st.info("No missing values remaining!")
+
+            # Pagination for full table
+            st.subheader("Full Data Preview (paginated)")
+            page_size = st.slider("Rows per page", 100, 5_000, 1_000, key="page_size")
+            total_rows = len(df)
+            max_page = max(1, total_rows // page_size + (1 if total_rows % page_size else 0))
+            page = st.number_input("Page", 1, max_page, 1, key="page_num")
+            start = (page - 1) * page_size
+            st.dataframe(df.iloc[start:start + page_size])
+
             with st.expander("Dtypes (After)"):
                 st.json(after_stats["dtypes"])
             with st.expander("Numeric Describe (After)"):
@@ -179,7 +189,7 @@ def section_dashboard_download():
                 a, b = st.columns(2)
                 with a:
                     st.subheader("Before")
-                    chart1 = alt_histogram(raw, col, f"Before: {col}")
+                    chart1 = alt_histogram(sample_for_preview(raw), col, f"Before: {col}")
                     if chart1:
                         st.altair_chart(chart1, use_container_width=True)
                 with b:
