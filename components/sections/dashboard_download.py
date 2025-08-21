@@ -4,6 +4,7 @@ import altair as alt
 import io
 import json
 import numpy as np
+import weasyprint
 from scipy import stats
 from utils.stats_utils import compute_basic_stats
 from utils.viz_utils import alt_histogram
