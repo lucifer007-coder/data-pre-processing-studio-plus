@@ -23,7 +23,7 @@ def main():
             page_title="Data Preprocessing Studio",
             page_icon="🧹",
             layout="wide",
-            initial_sidebar_state="expanded",
+            initial_sidebar_state="collapsed",   # <-- faster sidebar
         )
 
         section = sidebar_navigation()
