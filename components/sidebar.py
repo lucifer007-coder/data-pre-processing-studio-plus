@@ -2,10 +2,37 @@ import streamlit as st
 from session import reset_all, undo_last
 
 def sidebar_navigation() -> str:
+    # Logo at the top
     st.sidebar.image(
         "https://raw.githubusercontent.com/streamlit/streamlit/develop/docs/_static/img/streamlit-logo-light-text.svg",
         use_container_width=True,
     )
+
+    # ── Dark-Mode Toggle ──
+    if st.sidebar.checkbox("🌙 Dark mode"):
+        st.markdown(
+            """
+            <style>
+            /* Main app area */
+            .main {
+                background-color: #0e1117;
+                color: #fafafa;
+            }
+            /* Sidebar */
+            [data-testid="stSidebar"] {
+                background-color: #161b22;
+                color: #fafafa;
+            }
+            /* Text & widgets inside sidebar */
+            [data-testid="stSidebar"] .css-1d391kg,
+            [data-testid="stSidebar"] .css-17eq0hr {
+                color: #fafafa;
+            }
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
+
     st.sidebar.title("🧭 Navigation")
     section = st.sidebar.radio(
         "Go to section",
