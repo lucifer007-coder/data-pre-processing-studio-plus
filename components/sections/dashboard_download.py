@@ -2,23 +2,22 @@ import streamlit as st
 import pandas as pd
 import altair as alt
 import io
+import json
 import numpy as np
 from scipy import stats
 from utils.stats_utils import compute_basic_stats
 from utils.viz_utils import alt_histogram
 from utils.recommendations import PreprocessingRecommendations
+from preprocessing.pipeline import run_pipeline
 
-
-# ------------------------------------------------------------------
-# Helper: local lightweight compare_stats (avoids circular imports)
-# ------------------------------------------------------------------
+# ----------------------------------------------------------
+# Helper: lightweight compare_stats (no circular import)
+# ----------------------------------------------------------
 def compare_stats(before, after) -> dict:
-    """Lightweight version of utils.stats_utils.compare_stats for local use."""
     if not isinstance(before, dict):
         before = {}
     if not isinstance(after, dict):
         after = {}
-
     shape_before = before.get("shape", (0, 0))
     shape_after = after.get("shape", (0, 0))
     missing_before = before.get("missing_total", 0)
@@ -51,9 +50,71 @@ def compare_stats(before, after) -> dict:
     }
 
 
-# ------------------------------------------------------------------
+# ----------------------------------------------------------
+# 1. One-Click Notebook Export
+# ----------------------------------------------------------
+@st.cache_data(show_spinner="Generating notebook …")
+def _build_notebook(pipeline_steps):
+    """
+    Return bytes of a ready-to-run Jupyter notebook that contains:
+    - import pandas
+    - run_pipeline from our package
+    - the exact steps applied in the UI
+    """
+    try:
+        import nbformat as nbf
+    except ImportError:
+        raise ModuleNotFoundError("pip install nbformat")
+
+    nb = nbf.v4.new_notebook()
+    nb["cells"] = [
+        nbf.v4.new_markdown_cell("# Auto-generated notebook from Data Preprocessing Studio"),
+        nbf.v4.new_code_cell(
+            "import pandas as pd\n"
+            "from data_preprocessing_studio.preprocessing.pipeline import run_pipeline\n\n"
+            "steps = " + str(pipeline_steps) + "\n"
+            "df = pd.read_csv('original.csv')\n"
+            "df, msgs = run_pipeline(df, steps)\n"
+            "df.to_csv('clean.csv', index=False)\n"
+            "print('Cleaned dataset saved to clean.csv')\n"
+            "msgs"
+        ),
+    ]
+    buffer = io.StringIO()
+    nbf.write(nb, buffer)
+    return buffer.getvalue().encode()
+
+
+# ----------------------------------------------------------
+# 2. PDF Report (WeasyPrint)
+# ----------------------------------------------------------
+@st.cache_data(show_spinner="Generating PDF …")
+def _build_pdf_report():
+    """
+    Return bytes of a simple PDF containing the change-log.
+    Falls back gracefully if weasyprint is not installed.
+    """
+    try:
+        from weasyprint import HTML
+    except ImportError:
+        return None
+
+    html = f"""
+    <html>
+      <head><meta charset="utf-8"/></head>
+      <body style="font-family:Arial, sans-serif; margin:40px;">
+        <h1>Data Preprocessing Report</h1>
+        <h2>Change Log</h2>
+        <pre>{chr(10).join(st.session_state.changelog)}</pre>
+      </body>
+    </html>
+    """
+    return HTML(string=html).write_pdf()
+
+
+# ----------------------------------------------------------
 # Main dashboard section
-# ------------------------------------------------------------------
+# ----------------------------------------------------------
 def section_dashboard_download():
     st.header("📊 Dashboard & Download")
     df = st.session_state.df
@@ -63,12 +124,12 @@ def section_dashboard_download():
         return
 
     try:
-        # ── 0. Compute once, reuse everywhere -------------------------
+        # cached stats
         raw_stats   = compute_basic_stats(raw)
         after_stats = compute_basic_stats(df)
         comp = compare_stats(raw_stats, after_stats)
 
-        # ── 1. Data Quality Scorecard --------------------------------
+        # ── 1. Data Quality Scorecard -----------------------------
         st.subheader("Data Quality Scorecard")
         recommender = PreprocessingRecommendations()
         recommendations = recommender.analyze_dataset(df)
@@ -89,7 +150,7 @@ def section_dashboard_download():
                     if chart:
                         st.altair_chart(chart, use_container_width=True)
 
-        # ── 2. AI Bias Detection -------------------------------------
+        # ── 2. AI Bias Detection ----------------------------------
         st.subheader("AI Bias Detection")
         cat_cols = after_stats["categorical_cols"]
         if cat_cols:
@@ -114,7 +175,7 @@ def section_dashboard_download():
         else:
             st.info("No categorical columns for bias analysis.")
 
-        # ── 3. Correlation Analysis ----------------------------------
+        # ── 3. Correlation Analysis -------------------------------
         st.subheader("Correlation Analysis")
         num_cols = after_stats["numeric_cols"]
         if num_cols:
@@ -134,7 +195,7 @@ def section_dashboard_download():
         else:
             st.info("No numeric columns for correlation analysis.")
 
-        # ── 4. Before / After Comparison -----------------------------
+        # ── 4. Before / After Comparison --------------------------
         st.subheader("Before/After Transformations")
         col1, col2 = st.columns(2)
         with col1:
@@ -154,7 +215,7 @@ def section_dashboard_download():
         with c4:
             st.metric("Memory (MB)", f"{after_stats.get('memory_usage_mb', 0):.2f}")
 
-        # ── 5. Statistical Test Results ------------------------------
+        # ── 5. Statistical Test Results ---------------------------
         st.subheader("Statistical Test Results")
         if num_cols:
             for col in num_cols[:3]:
@@ -171,7 +232,7 @@ def section_dashboard_download():
         else:
             st.info("No numeric columns for statistical tests.")
 
-        # ── 6. Anomaly Detection Heatmap -----------------------------
+        # ── 6. Anomaly Detection Heatmap --------------------------
         st.subheader("Anomaly Detection Heatmap")
         if num_cols:
             z_scores = pd.DataFrame(index=df.index)
@@ -199,7 +260,7 @@ def section_dashboard_download():
         else:
             st.info("No numeric columns for anomaly detection.")
 
-        # ── 7. Dashboard Tabs ---------------------------------------
+        # ── 7. Dashboard Tabs -------------------------------------
         t1, t2, t3 = st.tabs(["Summary", "Distributions", "Change Log"])
         with t1:
             # Added / Removed columns
@@ -208,7 +269,7 @@ def section_dashboard_download():
             if comp.get("removed_columns"):
                 st.warning(f"Removed columns: {', '.join(comp['removed_columns'])}")
 
-            # Missing values table
+            # Missing values
             st.subheader("Missing by Column (After)")
             miss_after = pd.Series(after_stats["missing_by_col"])
             if miss_after.sum() > 0:
@@ -227,7 +288,6 @@ def section_dashboard_download():
             )
             before_num = raw_stats.get("describe_numeric", {})
             after_num  = after_stats.get("describe_numeric", {})
-
             impacts = []
             for col in after_num:
                 if col in before_num:
@@ -251,7 +311,7 @@ def section_dashboard_download():
             else:
                 st.info("No numeric columns to compare.")
 
-            # dtypes & numeric describe expanders
+            # dtypes & numeric describe
             with st.expander("Dtypes (After)"):
                 st.json(after_stats["dtypes"])
             with st.expander("Numeric Describe (After)"):
@@ -293,9 +353,11 @@ def section_dashboard_download():
                 for i, msg in enumerate(st.session_state.changelog, start=1):
                     st.write(f"{i}. {msg}")
 
-        # ── 8. Download section ------------------------------------
+        # ── 8. Download section (CSV + JSON + PDF + Notebook) -----
         st.markdown("---")
-        st.subheader("Download Processed Data")
+        st.subheader("Download & Export")
+
+        # CSV
         buf = io.StringIO()
         df.to_csv(buf, index=False)
         st.download_button(
@@ -303,8 +365,48 @@ def section_dashboard_download():
             data=buf.getvalue(),
             file_name="preprocessed_data.csv",
             mime="text/csv",
-            help="Download the final processed dataset as a CSV file.",
+            help="Download the final processed dataset.",
         )
-        st.caption("All processing happens in your browser session.")
+
+        # JSON Pipeline Recipe
+        recipe = {
+            "steps": st.session_state.pipeline,
+            "shape_before": raw.shape,
+            "shape_after": df.shape,
+        }
+        json_buf = io.StringIO(json.dumps(recipe, indent=2))
+        st.download_button(
+            "📋 Download Pipeline Recipe (JSON)",
+            data=json_buf.getvalue(),
+            file_name="pipeline_recipe.json",
+            mime="application/json",
+            help="Save the pipeline and replay it later.",
+        )
+
+        # PDF Report
+        pdf_bytes = _build_pdf_report()
+        if pdf_bytes:
+            st.download_button(
+                "📄 Download PDF Report",
+                data=pdf_bytes,
+                file_name="report.pdf",
+                mime="application/pdf",
+                help="A concise PDF of the change log.",
+            )
+        else:
+            st.info("Install **weasyprint** (`pip install weasyprint`) for PDF reports.")
+
+        # One-Click Jupyter Notebook
+        if st.session_state.pipeline:
+            notebook_bytes = _build_notebook(st.session_state.pipeline)
+            st.download_button(
+                "🪄 Download Jupyter Notebook",
+                data=notebook_bytes,
+                file_name="generated_prep.ipynb",
+                mime="application/octet-stream",
+                help="A ready-to-run notebook that reproduces your pipeline.",
+            )
+        else:
+            st.info("No pipeline steps to export.")
     except Exception as e:
         st.error(f"Error in dashboard section: {e}")
