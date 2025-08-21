@@ -4,7 +4,7 @@ import altair as alt
 import io
 import numpy as np
 from scipy import stats
-from utils.stats_utils import compute_basic_stats, compare_stats
+from utils.stats_utils import compute_basic_stats
 from utils.viz_utils import alt_histogram
 from utils.recommendations import PreprocessingRecommendations
 
@@ -17,76 +17,78 @@ def section_dashboard_download():
         return
 
     try:
+        # ── Compute stats once, cached ---------------------------
         before_stats = compute_basic_stats(raw)
-        after_stats = compute_basic_stats(df)
+        after_stats  = compute_basic_stats(df)
         comp = compare_stats(before_stats, after_stats)
 
-        # Recommendations Scorecard
+        # ── 1. Data Quality Scorecard ----------------------------
         st.subheader("Data Quality Scorecard")
         recommender = PreprocessingRecommendations()
         recommendations = recommender.analyze_dataset(df)
-        if not recommendations:
-            st.info("No significant issues detected.")
-        else:
+        if recommendations:
             for i, rec in enumerate(recommendations, 1):
-                with st.expander(f"{i}. {rec['type'].replace('_', ' ').title()} (Severity: {rec.get('severity', 'medium')})"):
+                with st.expander(
+                    f"{i}. {rec['type'].replace('_', ' ').title()} "
+                    f"(Severity: {rec.get('severity', 'medium')})"
+                ):
                     st.write(f"**Suggestion**: {rec['suggestion']}")
-                    if 'columns' in rec:
+                    if "columns" in rec:
                         st.write(f"**Affected Columns**: {', '.join(rec['columns'])}")
-                    if 'column' in rec:
+                    if "column" in rec:
                         st.write(f"**Column**: {rec['column']}")
-                    if 'count' in rec:
-                        st.write(f"**Outlier Count**: {rec['count']}")
+                    if "count" in rec:
+                        st.write(f"**Count**: {rec['count']}")
+                    chart = recommender.visualize_recommendation(df, rec)
+                    if chart:
+                        st.altair_chart(chart, use_container_width=True)
 
-        # AI Bias Detection Visuals
+        # ── 2. AI Bias Detection --------------------------------
         st.subheader("AI Bias Detection")
         cat_cols = after_stats["categorical_cols"]
         if cat_cols:
             for col in cat_cols:
                 value_counts = df[col].value_counts(normalize=True)
                 if value_counts.max() > 0.8:
-                    chart = alt.Chart(pd.DataFrame({
-                        'Category': value_counts.index,
-                        'Proportion': value_counts.values
-                    })).mark_bar().encode(
-                        x=alt.X('Category:N', title=col),
-                        y=alt.Y('Proportion:Q', title='Proportion'),
+                    chart = alt.Chart(
+                        pd.DataFrame(
+                            {"Category": value_counts.index, "Proportion": value_counts.values}
+                        )
+                    ).mark_bar().encode(
+                        x=alt.X("Category:N", title=col),
+                        y=alt.Y("Proportion:Q", title="Proportion"),
                         color=alt.condition(
                             alt.datum.Proportion > 0.8,
-                            alt.value('red'),
-                            alt.value('steelblue')
+                            alt.value("red"),
+                            alt.value("steelblue"),
                         ),
-                        tooltip=['Category', 'Proportion']
-                    ).properties(
-                        title=f"Bias Risk in {col}",
-                        width=400,
-                        height=300
-                    )
+                        tooltip=["Category", "Proportion"],
+                    ).properties(title=f"Bias Risk in {col}", width=400, height=300)
                     st.altair_chart(chart, use_container_width=True)
         else:
             st.info("No categorical columns for bias analysis.")
 
-        # Correlation Analysis
+        # ── 3. Correlation Analysis ------------------------------
         st.subheader("Correlation Analysis")
         num_cols = after_stats["numeric_cols"]
         if num_cols:
             corr_matrix = df[num_cols].corr()
-            corr_data = corr_matrix.stack().reset_index().rename(columns={0: 'Correlation', 'level_0': 'Variable1', 'level_1': 'Variable2'})
-            chart = alt.Chart(corr_data).mark_rect().encode(
-                x=alt.X('Variable1:N', title=''),
-                y=alt.Y('Variable2:N', title=''),
-                color=alt.Color('Correlation:Q', scale=alt.Scale(scheme='redblue', domain=[-1, 1])),
-                tooltip=['Variable1', 'Variable2', 'Correlation']
-            ).properties(
-                title="Correlation Heatmap",
-                width=400,
-                height=400
+            corr_data = (
+                corr_matrix.stack()
+                .reset_index()
+                .rename(columns={0: "Correlation", "level_0": "Variable1", "level_1": "Variable2"})
             )
+            chart = alt.Chart(corr_data).mark_rect().encode(
+                x=alt.X("Variable1:N", title=""),
+                y=alt.Y("Variable2:N", title=""),
+                color=alt.Color("Correlation:Q", scale=alt.Scale(scheme="redblue", domain=[-1, 1])),
+                tooltip=["Variable1", "Variable2", "Correlation"],
+            ).properties(title="Correlation Heatmap", width=400, height=400)
             st.altair_chart(chart, use_container_width=True)
         else:
             st.info("No numeric columns for correlation analysis.")
 
-        # Before/After Comparisons
+        # ── 4. Before / After Comparison -------------------------
         st.subheader("Before/After Transformations")
         col1, col2 = st.columns(2)
         with col1:
@@ -95,6 +97,7 @@ def section_dashboard_download():
         with col2:
             st.write("**After**")
             st.dataframe(df.head())
+
         c1, c2, c3, c4 = st.columns(4)
         with c1:
             st.metric("Rows", f"{after_stats['shape'][0]}", f"{comp['rows_change']}")
@@ -105,12 +108,12 @@ def section_dashboard_download():
         with c4:
             st.metric("Memory (MB)", f"{after_stats.get('memory_usage_mb', 0):.2f}")
 
-        # Statistical Test Results
+        # ── 5. Statistical Test Results -------------------------
         st.subheader("Statistical Test Results")
         if num_cols:
-            for col in num_cols[:3]:  # Limit to 3 for brevity
+            for col in num_cols[:3]:
                 clean_series = df[col].dropna()
-                if len(clean_series) < 3:  # Shapiro-Wilk requires at least 3 samples
+                if len(clean_series) < 3:
                     st.info(f"Skipping Shapiro-Wilk test for {col}: insufficient non-NaN values.")
                     continue
                 stat, p_value = stats.shapiro(clean_series)
@@ -118,51 +121,84 @@ def section_dashboard_download():
                 if p_value < 0.05:
                     st.warning(f"{col} is not normally distributed (p < 0.05).")
                 else:
-                    st.info(f"{col} appears normally distributed (p >= 0.05).")
+                    st.info(f"{col} appears normally distributed (p ≥ 0.05).")
         else:
             st.info("No numeric columns for statistical tests.")
 
-        # Anomaly Detection Heatmap
+        # ── 6. Anomaly Detection Heatmap ------------------------
         st.subheader("Anomaly Detection Heatmap")
         if num_cols:
             z_scores = pd.DataFrame(index=df.index)
             for col in num_cols:
                 clean_series = df[col].dropna()
-                if len(clean_series) < 2:  # Z-score requires at least 2 values
+                if len(clean_series) < 2:
                     z_scores[col] = 0
                     continue
                 z_values = np.abs(stats.zscore(clean_series))
                 z_series = pd.Series(z_values, index=clean_series.index).reindex(df.index, fill_value=0)
                 z_scores[col] = z_series
-            heatmap_data = z_scores.stack().reset_index().rename(columns={0: 'Z_Score', 'level_1': 'Column'})
-            chart = alt.Chart(heatmap_data).mark_rect().encode(
-                x=alt.X('Column:N', title='Columns'),
-                y=alt.Y('level_0:O', title='Row Index'),
-                color=alt.Color('Z_Score:Q', scale=alt.Scale(scheme='reds')),
-                tooltip=['Column', 'Z_Score', 'level_0']
-            ).properties(
-                title="Anomaly Detection Heatmap (Z-Scores)",
-                width=400,
-                height=300
+            heatmap_data = (
+                z_scores.stack()
+                .reset_index()
+                .rename(columns={0: "Z_Score", "level_1": "Column"})
             )
+            chart = alt.Chart(heatmap_data).mark_rect().encode(
+                x=alt.X("Column:N", title="Columns"),
+                y=alt.Y("level_0:O", title="Row Index"),
+                color=alt.Color("Z_Score:Q", scale=alt.Scale(scheme="reds")),
+                tooltip=["Column", "Z_Score", "level_0"],
+            ).properties(title="Anomaly Detection Heatmap (Z-Scores)", width=400, height=300)
             st.altair_chart(chart, use_container_width=True)
             st.caption("Note: Edge computing preview simulated locally; no IoT data provided.")
         else:
             st.info("No numeric columns for anomaly detection.")
 
-        # Existing Dashboard Tabs
+        # ── 7. Dashboard Tabs -----------------------------------
         t1, t2, t3 = st.tabs(["Summary", "Distributions", "Change Log"])
         with t1:
-            if comp.get('added_columns'):
+            # 7a. Added/Removed columns
+            if comp.get("added_columns"):
                 st.success(f"Added columns: {', '.join(comp['added_columns'])}")
-            if comp.get('removed_columns'):
+            if comp.get("removed_columns"):
                 st.warning(f"Removed columns: {', '.join(comp['removed_columns'])}")
+
+            # 7b. Missing values table
             st.subheader("Missing by Column (After)")
             miss_after = pd.Series(after_stats["missing_by_col"])
             if miss_after.sum() > 0:
                 st.dataframe(miss_after[miss_after > 0].rename("missing_count"))
             else:
                 st.info("No missing values remaining!")
+
+            # 7c. Column Impact Tracker (NEW)
+            st.subheader("📈 Column Impact Tracker")
+            before_num = raw_stats.get("describe_numeric", {})
+            after_num  = after_stats.get("describe_numeric", {})
+
+            impacts = []
+            for col in after_num:
+                if col in before_num:
+                    b = before_num[col]
+                    a = after_num[col]
+                    mean_shift = abs(a.get("mean", 0) - b.get("mean", 0))
+                    raw_null_rate = raw_stats["missing_by_col"].get(col, 0) / max(raw_stats["shape"][0], 1)
+                    clean_null_rate = after_stats["missing_by_col"].get(col, 0) / max(after_stats["shape"][0], 1)
+                    null_shift = raw_null_rate - clean_null_rate
+                    impacts.append({
+                        "column": col,
+                        "mean_shift": round(mean_shift, 4),
+                        "null_rate_change": round(null_shift, 4),
+                    })
+
+            if impacts:
+                impacts_df = pd.DataFrame(impacts).sort_values(
+                    by="mean_shift", ascending=False
+                ).reset_index(drop=True)
+                st.dataframe(impacts_df, use_container_width=True)
+            else:
+                st.info("No numeric columns to compare.")
+
+            # 7d. dtypes & numeric describe expanders
             with st.expander("Dtypes (After)"):
                 st.json(after_stats["dtypes"])
             with st.expander("Numeric Describe (After)"):
@@ -170,6 +206,15 @@ def section_dashboard_download():
                     st.dataframe(pd.DataFrame(after_stats["describe_numeric"]))
                 else:
                     st.info("No numeric columns present.")
+
+            # 7e. Paginated preview
+            st.subheader("Full Data Preview (paginated)")
+            page_size = st.slider("Rows per page", 100, 5_000, 1_000, key="dash_page_size")
+            total_rows = len(df)
+            max_page = max(1, total_rows // page_size + (1 if total_rows % page_size else 0))
+            page = st.number_input("Page", 1, max_page, 1, key="dash_page_num")
+            start = (page - 1) * page_size
+            st.dataframe(df.iloc[start : start + page_size])
 
         with t2:
             if not num_cols:
@@ -195,6 +240,7 @@ def section_dashboard_download():
                 for i, msg in enumerate(st.session_state.changelog, start=1):
                     st.write(f"{i}. {msg}")
 
+        # ── 8. Download section ----------------------------------
         st.markdown("---")
         st.subheader("Download Processed Data")
         buf = io.StringIO()
@@ -209,3 +255,45 @@ def section_dashboard_download():
         st.caption("All processing happens in your browser session.")
     except Exception as e:
         st.error(f"Error in dashboard section: {e}")
+
+
+# ------------------------------------------------------------------
+# Helper kept here to avoid circular imports
+# ------------------------------------------------------------------
+def compare_stats(before, after) -> dict:
+    """Lightweight version of utils.stats_utils.compare_stats for local use."""
+    if not isinstance(before, dict):
+        before = {}
+    if not isinstance(after, dict):
+        after = {}
+
+    shape_before = before.get("shape", (0, 0))
+    shape_after = after.get("shape", (0, 0))
+    missing_before = before.get("missing_total", 0)
+    missing_after = after.get("missing_total", 0)
+    cols_before = before.get("columns", [])
+    cols_after = after.get("columns", [])
+
+    rows_change = shape_after[0] - shape_before[0]
+    cols_change = shape_after[1] - shape_before[1]
+    missing_change = missing_after - missing_before
+
+    rows_pct_change = (rows_change / max(shape_before[0], 1)) * 100
+    missing_pct_change = (missing_change / max(missing_before, 1)) * 100
+
+    added_columns = list(set(cols_after) - set(cols_before))
+    removed_columns = list(set(cols_before) - set(cols_after))
+
+    return {
+        "shape_before": shape_before,
+        "shape_after": shape_after,
+        "rows_change": rows_change,
+        "rows_pct_change": round(rows_pct_change, 2),
+        "columns_change": cols_change,
+        "missing_total_before": int(missing_before),
+        "missing_total_after": int(missing_after),
+        "missing_change": int(missing_change),
+        "missing_pct_change": round(missing_pct_change, 2),
+        "added_columns": added_columns,
+        "removed_columns": removed_columns,
+    }
