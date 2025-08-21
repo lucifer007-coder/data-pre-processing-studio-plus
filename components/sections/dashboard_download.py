@@ -218,6 +218,13 @@ def section_dashboard_download():
 
             # Column Impact Tracker
             st.subheader("📈 Column Impact Tracker")
+            st.markdown(
+                """
+                **mean_shift**: Absolute change in the column’s average value after preprocessing.  
+                **null_rate_change**: How much the missing-value ratio improved (positive = fewer NaNs).
+                """,
+                unsafe_allow_html=True,
+            )
             before_num = raw_stats.get("describe_numeric", {})
             after_num  = after_stats.get("describe_numeric", {})
 
