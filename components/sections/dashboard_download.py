@@ -5,9 +5,9 @@ import io
 import json
 import numpy as np
 from scipy import stats
-from data_preprocessing_studio.utils.stats_utils import compute_basic_stats
-from data_preprocessing_studio.utils.viz_utils import alt_histogram
-from data_preprocessing_studio.utils.recommendations import PreprocessingRecommendations
+from utils.stats_utils import compute_basic_stats
+from utils.viz_utils import alt_histogram
+from utils.recommendations import PreprocessingRecommendations
 
 
 # ----------------------------------------------------------
