@@ -319,31 +319,3 @@ def section_dashboard_download():
             mime="application/json",
             help="Save the pipeline and replay it later.",
         )
-
-        # PDF Report
-        pdf_bytes = _build_pdf_report()
-        if pdf_bytes:
-            st.download_button(
-                "📄 Download PDF Report",
-                data=pdf_bytes,
-                file_name="report.pdf",
-                mime="application/pdf",
-                help="A concise PDF of the change log.",
-            )
-        else:
-            st.info("Install **weasyprint** (`pip install weasyprint`) for PDF reports.")
-
-        # One-Click Jupyter Notebook
-        if st.session_state.pipeline:
-            notebook_bytes = _build_notebook(st.session_state.pipeline)
-            st.download_button(
-                "🪄 Download Jupyter Notebook",
-                data=notebook_bytes,
-                file_name="generated_prep.ipynb",
-                mime="application/octet-stream",
-                help="A ready-to-run notebook that reproduces your pipeline.",
-            )
-        else:
-            st.info("No pipeline steps to export.")
-    except Exception as e:
-        st.error(f"Error in dashboard section: {e}")
