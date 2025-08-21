@@ -49,69 +49,6 @@ def compare_stats(before, after) -> dict:
         "removed_columns": removed_columns,
     }
 
-
-# ----------------------------------------------------------
-# 1. One-Click Notebook Export
-# ----------------------------------------------------------
-@st.cache_data(show_spinner="Generating notebook …")
-def _build_notebook(pipeline_steps):
-    """
-    Return bytes of a ready-to-run Jupyter notebook that contains:
-    - import pandas
-    - run_pipeline from our package
-    - the exact steps applied in the UI
-    """
-    try:
-        import nbformat as nbf
-    except ImportError:
-        raise ModuleNotFoundError("pip install nbformat")
-
-    nb = nbf.v4.new_notebook()
-    nb["cells"] = [
-        nbf.v4.new_markdown_cell("# Auto-generated notebook from Data Preprocessing Studio"),
-        nbf.v4.new_code_cell(
-            "import pandas as pd\n"
-            "from data_preprocessing_studio.preprocessing.pipeline import run_pipeline\n\n"
-            "steps = " + str(pipeline_steps) + "\n"
-            "df = pd.read_csv('original.csv')\n"
-            "df, msgs = run_pipeline(df, steps)\n"
-            "df.to_csv('clean.csv', index=False)\n"
-            "print('Cleaned dataset saved to clean.csv')\n"
-            "msgs"
-        ),
-    ]
-    buffer = io.StringIO()
-    nbf.write(nb, buffer)
-    return buffer.getvalue().encode()
-
-
-# ----------------------------------------------------------
-# 2. PDF Report (WeasyPrint)
-# ----------------------------------------------------------
-@st.cache_data(show_spinner="Generating PDF …")
-def _build_pdf_report():
-    """
-    Return bytes of a simple PDF containing the change-log.
-    Falls back gracefully if weasyprint is not installed.
-    """
-    try:
-        from weasyprint import HTML
-    except ImportError:
-        return None
-
-    html = f"""
-    <html>
-      <head><meta charset="utf-8"/></head>
-      <body style="font-family:Arial, sans-serif; margin:40px;">
-        <h1>Data Preprocessing Report</h1>
-        <h2>Change Log</h2>
-        <pre>{chr(10).join(st.session_state.changelog)}</pre>
-      </body>
-    </html>
-    """
-    return HTML(string=html).write_pdf()
-
-
 # ----------------------------------------------------------
 # Main dashboard section
 # ----------------------------------------------------------
