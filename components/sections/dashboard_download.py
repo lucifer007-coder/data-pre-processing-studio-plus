@@ -5,10 +5,10 @@ import io
 import json
 import numpy as np
 from scipy import stats
-from utils.stats_utils import compute_basic_stats
-from utils.viz_utils import alt_histogram
-from utils.recommendations import PreprocessingRecommendations
-from preprocessing.pipeline import run_pipeline
+from data_preprocessing_studio.utils.stats_utils import compute_basic_stats
+from data_preprocessing_studio.utils.viz_utils import alt_histogram
+from data_preprocessing_studio.utils.recommendations import PreprocessingRecommendations
+from data_preprocessing_studio.preprocessing.pipeline import run_pipeline
 
 # ----------------------------------------------------------
 # Helper: lightweight compare_stats (no circular import)
@@ -48,6 +48,69 @@ def compare_stats(before, after) -> dict:
         "added_columns": added_columns,
         "removed_columns": removed_columns,
     }
+
+
+# ----------------------------------------------------------
+# 1. One-Click Notebook Export
+# ----------------------------------------------------------
+@st.cache_data(show_spinner="Generating notebook …")
+def _build_notebook(pipeline_steps):
+    """
+    Return bytes of a ready-to-run Jupyter notebook that contains:
+    - import pandas
+    - run_pipeline from our package
+    - the exact steps applied in the UI
+    """
+    try:
+        import nbformat as nbf
+    except ImportError:
+        raise ModuleNotFoundError("pip install nbformat")
+
+    nb = nbf.v4.new_notebook()
+    nb["cells"] = [
+        nbf.v4.new_markdown_cell("# Auto-generated notebook from Data Preprocessing Studio"),
+        nbf.v4.new_code_cell(
+            "import pandas as pd\n"
+            "from data_preprocessing_studio.preprocessing.pipeline import run_pipeline\n\n"
+            "steps = " + str(pipeline_steps) + "\n"
+            "df = pd.read_csv('original.csv')\n"
+            "df, msgs = run_pipeline(df, steps)\n"
+            "df.to_csv('clean.csv', index=False)\n"
+            "print('Cleaned dataset saved to clean.csv')\n"
+            "msgs"
+        ),
+    ]
+    buffer = io.StringIO()
+    nbf.write(nb, buffer)
+    return buffer.getvalue().encode()
+
+
+# ----------------------------------------------------------
+# 2. PDF Report (WeasyPrint)
+# ----------------------------------------------------------
+@st.cache_data(show_spinner="Generating PDF …")
+def _build_pdf_report():
+    """
+    Return bytes of a simple PDF containing the change-log.
+    Falls back gracefully if weasyprint is not installed.
+    """
+    try:
+        from weasyprint import HTML
+    except ImportError:
+        return None
+
+    html = f"""
+    <html>
+      <head><meta charset="utf-8"/></head>
+      <body style="font-family:Arial, sans-serif; margin:40px;">
+        <h1>Data Preprocessing Report</h1>
+        <h2>Change Log</h2>
+        <pre>{chr(10).join(st.session_state.changelog)}</pre>
+      </body>
+    </html>
+    """
+    return HTML(string=html).write_pdf()
+
 
 # ----------------------------------------------------------
 # Main dashboard section
@@ -319,3 +382,31 @@ def section_dashboard_download():
             mime="application/json",
             help="Save the pipeline and replay it later.",
         )
+
+        # PDF Report
+        pdf_bytes = _build_pdf_report()
+        if pdf_bytes:
+            st.download_button(
+                "📄 Download PDF Report",
+                data=pdf_bytes,
+                file_name="report.pdf",
+                mime="application/pdf",
+                help="A concise PDF of the change log.",
+            )
+        else:
+            st.info("Install **weasyprint** (`pip install weasyprint`) for PDF reports.")
+
+        # One-Click Jupyter Notebook
+        if st.session_state.pipeline:
+            notebook_bytes = _build_notebook(st.session_state.pipeline)
+            st.download_button(
+                "🪄 Download Jupyter Notebook",
+                data=notebook_bytes,
+                file_name="generated_prep.ipynb",
+                mime="application/octet-stream",
+                help="A ready-to-run notebook that reproduces your pipeline.",
+            )
+        else:
+            st.info("No pipeline steps to export.")
+    except Exception as e:
+        st.error(f"Error in dashboard section: {e}")
