@@ -6,6 +6,17 @@ from session import init_session
 
 logger = logging.getLogger(__name__)
 
+@st.cache_data(show_spinner="Reading file …", ttl=600)
+def _load_csv(file_obj, max_rows=None):
+    """
+    Load CSV with optional row limit.  Uses pyarrow backend.
+    """
+    if max_rows:
+        df = pd.read_csv(file_obj, nrows=max_rows, engine="pyarrow")
+    else:
+        df = pd.read_csv(file_obj, engine="pyarrow")
+    return _arrowize(df)
+
 def section_upload():
     st.title("🧹 Data Preprocessing Studio")
     st.caption("Upload a CSV, chain preprocessing steps, preview changes, and download the cleaned dataset.")
@@ -13,15 +24,15 @@ def section_upload():
     file = st.file_uploader(
         "Upload CSV file",
         type=["csv"],
-        help="CSV only. For large files, previews are sampled.",
+        help="CSV only.  Large files are sampled by default.",
     )
 
     if file:
+        preview_only = st.checkbox("Fast preview (first 50 000 rows)", value=True)
         try:
-            # 1. Load the file
-            df = pd.read_csv(file)
+            df = _load_csv(file, max_rows=50_000 if preview_only else None)
 
-            # 2. Reset all session state
+            # Reset session
             st.session_state.raw_df = df.copy()
             st.session_state.df = df.copy()
             st.session_state.history = []
@@ -29,12 +40,10 @@ def section_upload():
             st.session_state.changelog = ["📥 Loaded dataset."]
             st.session_state.last_preview = None
 
-            # 3. Notify the user
             st.success(f"Loaded dataset with shape {df.shape}.")
 
-            # 4. Display a preview
             with st.expander("Peek at data", expanded=True):
-                st.dataframe(_arrowize(sample_for_preview(df)))
+                st.dataframe(sample_for_preview(df))
 
         except pd.errors.EmptyDataError:
             logger.error("Empty CSV file.")
