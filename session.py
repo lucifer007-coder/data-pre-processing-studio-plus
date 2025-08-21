@@ -1,6 +1,7 @@
 import logging
 import streamlit as st
 import pandas as pd
+import gc
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +52,7 @@ def reset_all():
         st.session_state.pipeline = []
         st.session_state.changelog = []
         st.session_state.last_preview = None
+        gc.collect()   # <-- force free memory
         st.success("Reset all data and pipeline.")
     except Exception as e:
         logger.error(f"Error in reset_all: {e}")
