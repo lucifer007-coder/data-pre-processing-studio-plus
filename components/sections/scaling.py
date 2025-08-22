@@ -1,79 +1,67 @@
 import logging
 import streamlit as st
-import pandas as pd
-from utils.data_utils import _arrowize, sample_for_preview, dtype_split
-from preprocessing.steps import rebalance_dataset
-from utils.stats_utils import compute_basic_stats
+from utils.data_utils import dtype_split, _arrowize, sample_for_preview
+from preprocessing.steps import scale_features
 
 logger = logging.getLogger(__name__)
 
-def section_imbalanced():
-    st.header("⚖️ Imbalanced Data (Classification)")
+def section_scaling():
+    st.header("📏 Feature Scaling & Normalization")
     df = st.session_state.df
     if df is None:
         st.warning("Upload a dataset first.")
         return
 
     try:
-        cat_cols = dtype_split(df)[1]
-        if not cat_cols:
-            st.info("No categorical columns available for classification.")
+        num_cols, _ = dtype_split(df)
+        if not num_cols:
+            st.info("No numeric columns available.")
             return
 
-        st.subheader("Configure Rebalancing")
-        target = st.selectbox(
-            "Target column (classification)",
-            ["(none)"] + cat_cols,
-            help="Select the target column for classification. Must be categorical."
+        st.subheader("Configure Scaling")
+        cols = st.multiselect(
+            "Numeric columns to scale",
+            num_cols,
+            help="Select numeric columns to scale."
         )
         method = st.radio(
-            "Rebalancing method",
-            ["oversample", "undersample"],
+            "Scaler",
+            ["standard", "minmax", "robust"],
             horizontal=True,
-            help="Oversample: Duplicate minority classes; Undersample: Reduce majority classes."
+            help="Standard: Zero mean, unit variance; MinMax: Scale to [0,1]; Robust: Scale using median and IQR."
         )
-        ratio = st.slider(
-            "Ratio",
-            0.2, 3.0, 1.0, 0.1,
-            help="For oversampling, ratio × majority class size; for undersampling, ratio × minority class size."
+        keep_original = st.checkbox(
+            "Keep original columns",
+            help="Create new scaled columns instead of overwriting."
         )
 
-        c1, c2 = st.columns(2)
+        c1, c2, c3 = st.columns([1, 1, 1])
         with c1:
-            if st.button("🔍 Preview Rebalancing", help="Preview the effect on a sampled dataset"):
-                if target == "(none)":
-                    st.warning("Please select a target column.")
+            if st.button("🔍 Preview Scaling", help="Preview the effect on a sampled dataset"):
+                if not cols:
+                    st.warning("Please select at least one column.")
                     return
                 prev = sample_for_preview(df)
-                preview_df, msg = rebalance_dataset(prev, target, method, ratio, preview=True)
+                preview_df, msg = scale_features(prev, cols, method, keep_original, preview=True)
                 st.session_state.last_preview = (preview_df, msg)
                 st.info(msg)
                 st.dataframe(_arrowize(preview_df.head(10)))
-                # Display class distribution
-                if target in df.columns:
-                    st.subheader("Class Distribution")
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        st.write("Before Rebalancing")
-                        counts_before = df[target].value_counts(dropna=False)
-                        st.dataframe(pd.DataFrame({"Count": counts_before}))
-                    with col2:
-                        st.write("After Rebalancing (Preview)")
-                        counts_after = preview_df[target].value_counts(dropna=False)
-                        st.dataframe(pd.DataFrame({"Count": counts_after}))
-
         with c2:
-            if st.button("📦 Add to Pipeline", help="Add rebalancing step to the pipeline"):
-                if target == "(none)":
-                    st.warning("Please select a target column.")
+            if st.button("📦 Add to Pipeline", help="Add scaling step to the pipeline"):
+                if not cols:
+                    st.warning("Please select at least one column.")
                     return
                 step = {
-                    "kind": "rebalance",
-                    "params": {"target": target, "method": method, "ratio": ratio}
+                    "kind": "scale",
+                    "params": {"columns": cols, "method": method, "keep_original": keep_original}
                 }
                 st.session_state.pipeline.append(step)
-                st.success(f"Added rebalancing step for '{target}' to pipeline.")
+                st.success("Added scaling step to pipeline.")
+        with c3:
+            if st.button("🔄 Reset Selection", help="Clear selected columns and options"):
+                st.session_state["scale_cols"] = []
+                st.rerun()
 
     except Exception as e:
-        logger.error(f"Error in section_imbalanced: {e}")
-        st.error(f"Error in imbalanced data section: {e}")
+        logger.error(f"Error in section_scaling: {e}")
+        st.error(f"Error in scaling section: {e}")
