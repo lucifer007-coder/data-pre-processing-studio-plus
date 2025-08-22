@@ -1,10 +1,9 @@
 import streamlit as st
 import pandas as pd
 from utils.recommendations import PreprocessingRecommendations
-from utils.data_utils import _arrowize
 
 def section_recommendations():
-    st.header("🔍 Data Quality Recommendations")
+    st.header("Recommendations")
     df = st.session_state.df
     if df is None:
         st.warning("Upload a dataset first.")
@@ -18,18 +17,18 @@ def section_recommendations():
             st.info("No significant issues detected in the dataset.")
             return
 
-        st.subheader("Recommended Preprocessing Steps")
+        st.subheader("Data Quality Recommendations")
         for i, rec in enumerate(recommendations, 1):
-            with st.expander(f"{i}. {rec['type'].replace('_', ' ').title()} (Priority: {rec.get('priority', 0.5):.2f})"):
+            with st.expander(f"{i}. {rec['type'].replace('_', ' ').title()} (Severity: {rec.get('severity', 'medium')} | Priority: {rec.get('priority', 0.5):.2f})"):
                 st.write(f"**Suggestion**: {rec['suggestion']}")
-                if 'column' in rec:
-                    st.write(f"**Column**: {rec['column']}")
                 if 'columns' in rec:
                     st.write(f"**Affected Columns**: {', '.join(rec['columns'])}")
-                if 'missing_count' in rec:
-                    st.write(f"**Missing Count**: {rec['missing_count']} ({rec['missing_ratio']*100:.1f}%)")
+                if 'column' in rec:
+                    st.write(f"**Column**: {rec['column']}")
                 if 'count' in rec:
                     st.write(f"**Count**: {rec['count']}")
+                if 'pipeline' in rec:
+                    st.write(f"**Suggested Pipeline**: {rec['suggestion'].split(': ')[1]}")
                 
                 # Visualization
                 chart = recommender.visualize_recommendation(df, rec)
@@ -40,92 +39,76 @@ def section_recommendations():
                 if rec['type'] == 'missing_data':
                     col1, col2 = st.columns(2)
                     with col1:
-                        if st.button(f"📦 Add Imputation", key=f"impute_{i}"):
-                            strategy = 'mean' if rec['column'] in dtype_split(df)[0] else 'mode'
+                        if st.button(f"📦 Add Imputation to Pipeline", key=f"impute_{i}"):
                             step = {
                                 "kind": "impute",
-                                "params": {"columns": [rec['column']], "strategy": strategy}
+                                "params": {"columns": rec['columns'], "strategy": "mean"}
                             }
                             st.session_state.pipeline.append(step)
-                            st.success("Added imputation step to pipeline.")
+                            st.success("Added imputation to pipeline.")
                     with col2:
-                        if st.button(f"📦 Add Drop", key=f"drop_{i}"):
+                        if st.button(f"📦 Add Drop to Pipeline", key=f"drop_{i}"):
                             step = {
                                 "kind": "drop_missing",
-                                "params": {"axis": "rows", "columns": [rec['column']]}
+                                "params": {"axis": "rows", "columns": rec['columns']}
                             }
                             st.session_state.pipeline.append(step)
-                            st.success("Added drop step to pipeline.")
+                            st.success("Added drop to pipeline.")
                 elif rec['type'] == 'outliers':
-                    if st.button(f"📦 Add Outlier Handling", key=f"outliers_{i}"):
+                    if st.button(f"📦 Add Outlier Handling to Pipeline", key=f"outliers_{i}"):
                         step = {
                             "kind": "outliers",
-                            "params": {"columns": [rec['column']], "method": "iqr", "factor": 1.5}
+                            "params": {"columns": [rec['column']], "method": "cap", "detect_method": "Z-score"}
                         }
                         st.session_state.pipeline.append(step)
-                        st.success("Added outlier handling step to pipeline.")
+                        st.success("Added outlier handling to pipeline.")
                 elif rec['type'] == 'bias_risk':
-                    if st.button(f"📦 Add Rebalancing", key=f"bias_{i}"):
+                    if st.button(f"📦 Add Rebalancing to Pipeline", key=f"bias_{i}"):
                         step = {
                             "kind": "rebalance",
                             "params": {"target": rec['column'], "method": "oversample", "ratio": 1.0}
                         }
                         st.session_state.pipeline.append(step)
-                        st.success("Added rebalancing step to pipeline.")
+                        st.success("Added rebalancing to pipeline.")
                 elif rec['type'] == 'duplicates':
-                    if st.button(f"📦 Add Duplicate Removal", key=f"duplicates_{i}"):
+                    if st.button(f"📦 Add Duplicate Removal to Pipeline", key=f"duplicates_{i}"):
                         step = {
                             "kind": "duplicates",
                             "params": {"subset": None, "keep": "first"}
                         }
                         st.session_state.pipeline.append(step)
-                        st.success("Added duplicate removal step to pipeline.")
+                        st.success("Added duplicate removal to pipeline.")
                 elif rec['type'] == 'data_type_mismatch':
-                    if st.button(f"📦 Add Type Conversion", key=f"type_{i}"):
-                        type_val = "numeric" if "numeric" in rec['suggestion'] else "datetime"
+                    if st.button(f"📦 Add Type Conversion to Pipeline", key=f"type_{i}"):
                         step = {
-                            "kind": "type_convert" if type_val == "numeric" else "standardize_dates",
-                            "params": {"column": rec['column'], "type": type_val} if type_val == "numeric" else {"columns": [rec['column']]}
+                            "kind": "type_convert",
+                            "params": {"column": rec['column'], "type": "numeric"}
                         }
                         st.session_state.pipeline.append(step)
-                        st.success("Added type conversion step to pipeline.")
+                        st.success("Added type conversion to pipeline.")
                 elif rec['type'] == 'skewness':
-                    transform = 'log' if 'log' in rec['suggestion'] else 'square_root'
-                    if st.button(f"📦 Add {transform.title()} Transformation", key=f"skew_{i}"):
+                    transform = 'log' if df[rec['column']].min() > 0 else 'square_root'
+                    if st.button(f"📦 Add {transform.title()} Transformation to Pipeline", key=f"skew_{i}"):
                         step = {
                             "kind": "skewness_transform",
                             "params": {"column": rec['column'], "transform": transform}
                         }
                         st.session_state.pipeline.append(step)
-                        st.success(f"Added {transform} transformation step to pipeline.")
+                        st.success(f"Added {transform} transformation to pipeline.")
                 elif rec['type'] == 'sensitive_data':
-                    if st.button(f"📦 Add PII Masking", key=f"pii_{i}"):
+                    if st.button(f"📦 Add Masking to Pipeline", key=f"pii_{i}"):
                         step = {
                             "kind": "mask_pii",
-                            "params": {"column": rec['column'], "pii_types": ["email", "phone", "credit_card"]}
+                            "params": {"column": rec['column']}
                         }
                         st.session_state.pipeline.append(step)
-                        st.success("Added PII masking step to pipeline.")
+                        st.success("Added PII masking to pipeline.")
                 elif rec['type'] == 'auto_pipeline':
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        if st.button(f"🔍 Preview Auto Pipeline", key=f"preview_auto_{i}"):
-                            preview_df, messages = recommender.preview_pipeline(df, rec['pipeline'])
-                            st.session_state.last_preview = (preview_df, "\n".join(messages))
-                            st.write("**Preview Results**:")
-                            for msg in messages:
-                                st.write(msg)
-                            st.dataframe(_arrowize(preview_df.head(10)))
-                    with col2:
-                        if st.button(f"📦 Add Auto Pipeline", key=f"auto_{i}"):
-                            for step in rec['pipeline']:
-                                st.session_state.pipeline.append(step)
-                            st.success("Added auto pipeline steps to pipeline.")
-
-        if st.button("🔄 Clear Recommendations", help="Reset recommendations"):
-            st.session_state.last_preview = None
-            st.rerun()
+                    if st.button(f"📦 Add Auto Pipeline", key=f"auto_{i}"):
+                        for step in rec['pipeline']:
+                            st.session_state.pipeline.append(step)
+                        st.success("Added auto pipeline steps.")
 
     except Exception as e:
-        logger.error(f"Error generating recommendations: {e}")
+
         st.error(f"Error generating recommendations: {e}")
