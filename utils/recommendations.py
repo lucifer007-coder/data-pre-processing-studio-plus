@@ -1,345 +1,169 @@
+import streamlit as st
 import pandas as pd
-import numpy as np
-from scipy import stats
-import regex as re
-import altair as alt
-from typing import List, Dict, Any, Optional, Tuple
-from utils.data_utils import dtype_split
+from utils.recommendations import PreprocessingRecommendations
+from utils.data_utils import _arrowize, dtype_split
 from utils.stats_utils import compute_basic_stats
-from utils.viz_utils import alt_histogram
 import logging
-
-try:
-    from preprocessing.pipeline import run_pipeline
-except ImportError as e:
-    logging.error(f"Failed to import run_pipeline: {e}")
-    run_pipeline = None
 
 logger = logging.getLogger(__name__)
 
-class PreprocessingRecommendations:
-    def __init__(self):
-        """Initialize with PII patterns aligned with steps.py."""
-        self.pii_patterns = {
-            'email': r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b',
-            'phone': r'\b(\+\d{1,3}[-.\s]?\d{1,4}[-.\s]?\d{1,4}[-.\s]?\d{1,4}|\d{3}[-.\s]\d{3}[-.\s]\d{4})\b',
-            'credit_card': r'\b(?:\d[ -]*?){13,16}\b'
-        }
+def section_recommendations():
+    st.header("🔍 Data Quality Recommendations")
+    df = st.session_state.df
+    if df is None:
+        st.warning("Upload a dataset first.")
+        return
 
-    def analyze_dataset(self, df: pd.DataFrame) -> List[Dict[str, Any]]:
-        """
-        Analyze the DataFrame and return a list of preprocessing recommendations.
-        Returns recommendations sorted by priority.
-        """
-        try:
-            if not isinstance(df, pd.DataFrame):
-                logger.error("Input must be a pandas DataFrame")
-                return []
+    try:
+        recommender = PreprocessingRecommendations()
+        recommendations = recommender.analyze_dataset(df)
+        
+        if not recommendations:
+            st.info("No significant issues detected in the dataset.")
+            return
 
-            stats = compute_basic_stats(df)
-            recommendations = []
-            num_cols, cat_cols = dtype_split(df)
+        st.subheader("Summary of Recommendations")
+        summary_data = []
+        for i, rec in enumerate(recommendations, 1):
+            summary_data.append({
+                "ID": i,
+                "Type": rec['type'].replace('_', ' ').title(),
+                "Priority": f"{rec.get('priority', 0.5):.2f}",
+                "Severity": rec.get('severity', 'medium').title(),
+                "Column": rec.get('column', rec.get('columns', ['N/A'])[0]),
+                "Details": rec.get('suggestion', '')
+            })
+        st.dataframe(pd.DataFrame(summary_data), use_container_width=True)
 
-            # 1. Missing Data Analysis
-            missing_by_col = stats.get("missing_by_col", {})
-            if missing_by_col:
-                max_missing_ratio = max(v / stats["shape"][0] for v in missing_by_col.values())
-                threshold = max(0.05, min(0.1, 1000 / stats["shape"][0]))
-                if max_missing_ratio > threshold:
-                    for col, missing_count in missing_by_col.items():
-                        missing_ratio = missing_count / stats["shape"][0]
-                        if missing_ratio > threshold:
-                            strategy = "mean" if col in num_cols else "mode"
-                            recommendations.append({
-                                'type': 'missing_data',
-                                'severity': 'high' if missing_ratio > 0.3 else 'medium',
-                                'suggestion': f"Impute missing values in '{col}' using {strategy} or drop rows/columns.",
-                                'column': col,
-                                'missing_count': missing_count,
-                                'missing_ratio': round(missing_ratio, 2),
-                                'priority': min(0.9, 0.7 + missing_ratio)
-                            })
+        st.subheader("Detailed Recommendations")
+        for i, rec in enumerate(recommendations, 1):
+            with st.expander(f"{i}. {rec['type'].replace('_', ' ').title()} (Priority: {rec.get('priority', 0.5):.2f})"):
+                st.write(f"**Suggestion**: {rec['suggestion']}")
+                if 'column' in rec:
+                    st.write(f"**Column**: {rec['column']}")
+                if 'columns' in rec:
+                    st.write(f"**Affected Columns**: {', '.join(rec['columns'])}")
+                if 'missing_count' in rec:
+                    st.write(f"**Missing Count**: {rec['missing_count']} ({rec['missing_ratio']*100:.1f}%)")
+                if 'count' in rec:
+                    st.write(f"**Count**: {rec['count']}")
 
-            # 2. Outlier Detection
-            for col in num_cols:
-                clean_series = df[col].dropna()
-                if len(clean_series) < 2:
-                    continue
-                q1, q3 = clean_series.quantile([0.25, 0.75])
-                iqr = q3 - q1
-                iqr_outliers = clean_series[(clean_series < q1 - 1.5 * iqr) | (clean_series > q3 + 1.5 * iqr)]
-                z_scores = np.abs(stats.zscore(clean_series))
-                z_outliers = clean_series[z_scores > 3]
-                outlier_count = max(len(iqr_outliers), len(z_outliers))
-                if outlier_count > len(df) * 0.01:
-                    recommendations.append({
-                        'type': 'outliers',
-                        'column': col,
-                        'count': outlier_count,
-                        'suggestion': 'Handle outliers using IQR or z-score capping/removal, or apply log transformation.',
-                        'priority': 0.7
-                    })
+                # Visualization
+                chart = recommender.visualize_recommendation(df, rec)
+                if chart:
+                    st.altair_chart(chart, use_container_width=True)
 
-            # 3. Bias Check (Entropy-based)
-            for col in cat_cols:
-                value_counts = df[col].value_counts(normalize=True, dropna=False)
-                if len(value_counts) > 1:
-                    entropy = -np.sum(value_counts * np.log2(value_counts + 1e-10))
-                    max_entropy = np.log2(len(value_counts))
-                    normalized_entropy = entropy / max_entropy if max_entropy > 0 else 1.0
-                    if normalized_entropy < 0.5:
-                        recommendations.append({
-                            'type': 'bias_risk',
-                            'column': col,
-                            'suggestion': 'Mitigate potential bias by oversampling minority classes or using robust algorithms.',
-                            'priority': 0.8
-                        })
+                # Actionable buttons
+                col1, col2 = st.columns(2)
+                if rec['type'] == 'missing_data':
+                    with col1:
+                        if st.button(f"📦 Add Imputation", key=f"impute_{i}", help="Add imputation step to pipeline"):
+                            strategy = 'mean' if rec['column'] in dtype_split(df)[0] else 'mode'
+                            step = {
+                                "kind": "impute",
+                                "params": {"columns": [rec['column']], "strategy": strategy}
+                            }
+                            st.session_state.pipeline.append(step)
+                            st.success("Added imputation step to pipeline.")
+                    with col2:
+                        if st.button(f"📦 Add Drop", key=f"drop_{i}", help="Add drop step to pipeline"):
+                            step = {
+                                "kind": "drop_missing",
+                                "params": {"axis": "rows", "columns": [rec['column']]}
+                            }
+                            st.session_state.pipeline.append(step)
+                            st.success("Added drop step to pipeline.")
+                elif rec['type'] == 'outliers':
+                    with col1:
+                        if st.button(f"📦 Add Outlier Handling", key=f"outliers_{i}", help="Add outlier handling step"):
+                            step = {
+                                "kind": "outliers",
+                                "params": {"columns": [rec['column']], "method": "iqr", "factor": 1.5}
+                            }
+                            st.session_state.pipeline.append(step)
+                            st.success("Added outlier handling step to pipeline.")
+                elif rec['type'] == 'bias_risk':
+                    with col1:
+                        if st.button(f"📦 Add Rebalancing", key=f"bias_{i}", help="Add rebalancing step"):
+                            step = {
+                                "kind": "rebalance",
+                                "params": {"target": rec['column'], "method": "oversample", "ratio": 1.0}
+                            }
+                            st.session_state.pipeline.append(step)
+                            st.success("Added rebalancing step to pipeline.")
+                elif rec['type'] == 'duplicates':
+                    with col1:
+                        if st.button(f"📦 Add Duplicate Removal", key=f"duplicates_{i}", help="Add duplicate removal step"):
+                            step = {
+                                "kind": "duplicates",
+                                "params": {"subset": None, "keep": "first"}
+                            }
+                            st.session_state.pipeline.append(step)
+                            st.success("Added duplicate removal step to pipeline.")
+                elif rec['type'] == 'data_type_mismatch':
+                    with col1:
+                        if st.button(f"📦 Add Type Conversion", key=f"type_{i}", help="Add type conversion step"):
+                            type_val = "numeric" if "numeric" in rec['suggestion'] else "datetime" if "datetime" in rec['suggestion'] else "boolean"
+                            step = {
+                                "kind": "type_convert" if type_val != "datetime" else "standardize_dates",
+                                "params": {"column": rec['column'], "type": type_val} if type_val != "datetime" else {"columns": [rec['column']]}
+                            }
+                            st.session_state.pipeline.append(step)
+                            st.success("Added type conversion step to pipeline.")
+                elif rec['type'] == 'skewness':
+                    with col1:
+                        transform = 'log' if 'log' in rec['suggestion'] else 'square_root'
+                        if st.button(f"📦 Add {transform.title()} Transformation", key=f"skew_{i}", help=f"Add {transform} transformation"):
+                            step = {
+                                "kind": "skewness_transform",
+                                "params": {"column": rec['column'], "transform": transform}
+                            }
+                            st.session_state.pipeline.append(step)
+                            st.success(f"Added {transform} transformation step to pipeline.")
+                elif rec['type'] == 'sensitive_data':
+                    with col1:
+                        if st.button(f"📦 Add PII Masking", key=f"pii_{i}", help="Add PII masking step"):
+                            step = {
+                                "kind": "mask_pii",
+                                "params": {"column": rec['column'], "pii_types": ["email", "phone", "credit_card"]}
+                            }
+                            st.session_state.pipeline.append(step)
+                            st.success("Added PII masking step to pipeline.")
+                elif rec['type'] == 'auto_pipeline':
+                    with col1:
+                        if st.button(f"🔍 Preview Auto Pipeline", key=f"preview_auto_{i}", help="Preview the auto pipeline"):
+                            try:
+                                preview_df, messages = recommender.preview_pipeline(df, rec['pipeline'])
+                                st.session_state.last_preview = (preview_df, "\n".join(messages))
+                                st.write("**Preview Results**:")
+                                for msg in messages:
+                                    st.write(msg)
+                                st.dataframe(_arrowize(preview_df.head(10)))
+                                # Display before/after stats
+                                before_stats = compute_basic_stats(df)
+                                after_stats = compute_basic_stats(preview_df)
+                                st.write("**Preview Statistics**")
+                                col_stats1, col_stats2 = st.columns(2)
+                                with col_stats1:
+                                    st.write("Before")
+                                    st.write(f"Shape: {before_stats['shape']}")
+                                    st.write(f"Missing Values: {before_stats['missing_total']}")
+                                with col_stats2:
+                                    st.write("After Preview")
+                                    st.write(f"Shape: {after_stats['shape']}")
+                                    st.write(f"Missing Values: {after_stats['missing_total']}")
+                            except Exception as e:
+                                st.error(f"Failed to preview pipeline: {e}")
+                    with col2:
+                        if st.button(f"📦 Add Auto Pipeline", key=f"auto_{i}", help="Add all auto pipeline steps"):
+                            for step in rec['pipeline']:
+                                st.session_state.pipeline.append(step)
+                            st.success("Added auto pipeline steps to pipeline.")
 
-            # 4. Duplicate Detection
-            duplicate_rows = stats.get("duplicate_rows", 0)
-            if duplicate_rows > max(1, len(df) * 0.005):
-                recommendations.append({
-                    'type': 'duplicates',
-                    'severity': 'medium',
-                    'suggestion': 'Remove duplicate rows to improve data quality.',
-                    'count': duplicate_rows,
-                    'priority': 0.6
-                })
+        if st.button("🔄 Clear Recommendations", help="Reset recommendations and clear preview"):
+            st.session_state.last_preview = None
+            st.rerun()
 
-            # 5. Data Type Mismatch
-            for col in df.columns:
-                inferred_type = pd.api.types.infer_dtype(df[col], skipna=True)
-                if inferred_type in ('mixed', 'string'):
-                    if df[col].str.isnumeric().any():
-                        recommendations.append({
-                            'type': 'data_type_mismatch',
-                            'column': col,
-                            'suggestion': 'Convert to numeric type to correct mixed or string-based numeric data.',
-                            'priority': 0.5
-                        })
-                    elif df[col].str.match(r'\d{4}-\d{2}-\d{2}').any():
-                        recommendations.append({
-                            'type': 'data_type_mismatch',
-                            'column': col,
-                            'suggestion': 'Standardize to datetime format to correct string-based dates.',
-                            'priority': 0.5
-                        })
-                    elif df[col].str.lower().isin(['true', 'false']).any():
-                        recommendations.append({
-                            'type': 'data_type_mismatch',
-                            'column': col,
-                            'suggestion': 'Convert to boolean type to correct string-based boolean data.',
-                            'priority': 0.5
-                        })
-
-            # 6. Skewness Analysis
-            for col in num_cols:
-                skewness = df[col].skew()
-                if abs(skewness) > 1:
-                    transform = 'log' if df[col].min() > 0 else 'square_root'
-                    if transform == 'log' and 'scipy' in globals():
-                        transform = 'boxcox'
-                    recommendations.append({
-                        'type': 'skewness',
-                        'column': col,
-                        'suggestion': f"Apply {transform} transformation to reduce skewness ({skewness:.2f}).",
-                        'priority': 0.4
-                    })
-
-            # 7. Sensitive Data Detection
-            for col in cat_cols:
-                for pii_type, pattern in self.pii_patterns.items():
-                    matches = df[col].astype(str).str.contains(pattern, regex=True, na=False).sum()
-                    if matches > 0:
-                        recommendations.append({
-                            'type': 'sensitive_data',
-                            'column': col,
-                            'suggestion': f"Mask potential {pii_type} PII in '{col}' to protect sensitive information.",
-                            'count': matches,
-                            'priority': 0.95
-                        })
-
-            # 8. Auto-Pipeline Suggestion
-            pipeline_suggestion = []
-            for rec in [r for r in recommendations if r['type'] == 'missing_data']:
-                strategy = 'mean' if rec['column'] in num_cols else 'mode'
-                pipeline_suggestion.append({
-                    'kind': 'impute',
-                    'params': {'columns': [rec['column']], 'strategy': strategy}
-                })
-            for rec in [r for r in recommendations if r['type'] == 'data_type_mismatch']:
-                if 'datetime' in rec['suggestion']:
-                    pipeline_suggestion.append({
-                        'kind': 'standardize_dates',
-                        'params': {'columns': [rec['column']]}
-                    })
-                elif 'boolean' in rec['suggestion']:
-                    pipeline_suggestion.append({
-                        'kind': 'type_convert',
-                        'params': {'column': rec['column'], 'type': 'boolean'}
-                    })
-                else:
-                    pipeline_suggestion.append({
-                        'kind': 'type_convert',
-                        'params': {'column': rec['column'], 'type': 'numeric'}
-                    })
-            if any(r['type'] == 'duplicates' for r in recommendations):
-                pipeline_suggestion.append({
-                    'kind': 'duplicates',
-                    'params': {'subset': None, 'keep': 'first'}
-                })
-            for rec in [r for r in recommendations if r['type'] == 'outliers']:
-                pipeline_suggestion.append({
-                    'kind': 'outliers',
-                    'params': {'columns': [rec['column']], 'method': 'iqr', 'factor': 1.5}
-                })
-            for rec in [r for r in recommendations if r['type'] == 'skewness']:
-                pipeline_suggestion.append({
-                    'kind': 'skewness_transform',
-                    'params': {'column': rec['column'], 'transform': 'log' if 'log' in rec['suggestion'] else 'square_root'}
-                })
-            for rec in [r for r in recommendations if r['type'] == 'bias_risk']:
-                pipeline_suggestion.append({
-                    'kind': 'rebalance',
-                    'params': {'target': rec['column'], 'method': 'oversample', 'ratio': 1.0}
-                })
-            for rec in [r for r in recommendations if r['type'] == 'sensitive_data']:
-                pipeline_suggestion.append({
-                    'kind': 'mask_pii',
-                    'params': {'column': rec['column'], 'pii_types': ['email', 'phone', 'credit_card']}
-                })
-            if pipeline_suggestion:
-                recommendations.append({
-                    'type': 'auto_pipeline',
-                    'suggestion': 'Apply the following preprocessing pipeline: ' + '; '.join(f"{step['kind']} ({step['params']})" for step in pipeline_suggestion),
-                    'pipeline': pipeline_suggestion,
-                    'priority': 0.85
-                })
-
-            recommendations.sort(key=lambda x: x.get('priority', 0.5), reverse=True)
-            return recommendations
-
-        except Exception as e:
-            logger.error(f"Error analyzing dataset: {e}")
-            return []
-
-    def visualize_recommendation(self, df: pd.DataFrame, recommendation: Dict[str, Any]) -> Optional[alt.Chart]:
-        """
-        Generate an Altair chart for a recommendation.
-        Returns None if visualization is not applicable.
-        """
-        try:
-            if recommendation['type'] == 'missing_data':
-                data = pd.DataFrame({
-                    'Column': [recommendation['column']],
-                    'Missing_Ratio': [recommendation['missing_ratio']]
-                })
-                chart = alt.Chart(data).mark_bar().encode(
-                    x=alt.X('Column:N', title='Column'),
-                    y=alt.Y('Missing_Ratio:Q', title='Missing Ratio', scale=alt.Scale(domain=[0, 1])),
-                    tooltip=['Column', alt.Tooltip('Missing_Ratio:Q', format='.2f')]
-                ).properties(
-                    title=f"Missing Data in {recommendation['column']}",
-                    width=400,
-                    height=300
-                )
-                return chart
-
-            elif recommendation['type'] == 'outliers':
-                col = recommendation['column']
-                clean_series = df[col].dropna()
-                if len(clean_series) < 2:
-                    return None
-                chart = alt_histogram(df, col, title=f"Outliers in {col} (Count: {recommendation['count']})")
-                return chart
-
-            elif recommendation['type'] == 'bias_risk':
-                col = recommendation['column']
-                value_counts = df[col].value_counts(normalize=True, dropna=False)
-                data = pd.DataFrame({
-                    'Category': value_counts.index,
-                    'Proportion': value_counts.values
-                })
-                chart = alt.Chart(data).mark_bar().encode(
-                    x=alt.X('Category:N', title=col),
-                    y=alt.Y('Proportion:Q', title='Proportion', scale=alt.Scale(domain=[0, 1])),
-                    color=alt.condition(
-                        alt.datum.Proportion > 0.8,
-                        alt.value('red'),
-                        alt.value('steelblue')
-                    ),
-                    tooltip=['Category', alt.Tooltip('Proportion:Q', format='.2f')]
-                ).properties(
-                    title=f"Bias Risk in {col}",
-                    width=400,
-                    height=300
-                )
-                return chart
-
-            elif recommendation['type'] == 'duplicates':
-                data = pd.DataFrame({
-                    'Status': ['Duplicates', 'Unique'],
-                    'Count': [recommendation['count'], len(df) - recommendation['count']]
-                })
-                chart = alt.Chart(data).mark_bar().encode(
-                    x=alt.X('Status:N', title='Status'),
-                    y=alt.Y('Count:Q', title='Count'),
-                    color=alt.condition(
-                        alt.datum.Status == 'Duplicates',
-                        alt.value('red'),
-                        alt.value('steelblue')
-                    ),
-                    tooltip=['Status', 'Count']
-                ).properties(
-                    title=f"Duplicate Rows (Count: {recommendation['count']})",
-                    width=400,
-                    height=300
-                )
-                return chart
-
-            elif recommendation['type'] == 'skewness':
-                col = recommendation['column']
-                chart = alt_histogram(df, col, title=f"Distribution of {col} (Skewness: {df[col].skew():.2f})")
-                return chart
-
-            elif recommendation['type'] == 'sensitive_data':
-                col = recommendation['column']
-                data = pd.DataFrame({
-                    'PII_Type': ['Potential PII', 'Non-PII'],
-                    'Count': [recommendation['count'], len(df[col].dropna()) - recommendation['count']]
-                })
-                chart = alt.Chart(data).mark_bar().encode(
-                    x=alt.X('PII_Type:N', title='Type'),
-                    y=alt.Y('Count:Q', title='Count'),
-                    color=alt.condition(
-                        alt.datum.PII_Type == 'Potential PII',
-                        alt.value('red'),
-                        alt.value('steelblue')
-                    ),
-                    tooltip=['PII_Type', 'Count']
-                ).properties(
-                    title=f"Sensitive Data in {col} (Count: {recommendation['count']})",
-                    width=400,
-                    height=300
-                )
-                return chart
-
-            return None
-
-        except Exception as e:
-            logger.error(f"Error visualizing recommendation: {e}")
-            return None
-
-    def preview_pipeline(self, df: pd.DataFrame, pipeline: List[Dict[str, Any]]) -> Tuple[pd.DataFrame, List[str]]:
-        """
-        Preview the effect of an auto-generated pipeline without modifying the input DataFrame.
-        Returns (preview_df, messages).
-        """
-        try:
-            if run_pipeline is None:
-                raise ImportError("run_pipeline function is not available")
-            preview_df, messages = run_pipeline(df, pipeline, preview=True)
-            return preview_df, messages
-        except Exception as e:
-            logger.error(f"Error previewing pipeline: {e}")
-            return df, [f"Error previewing pipeline: {e}"]
+    except Exception as e:
+        logger.error(f"Error generating recommendations: {e}")
+        st.error(f"Error generating recommendations: {e}")
