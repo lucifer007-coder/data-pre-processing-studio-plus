@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 
 def section_recommendations():
     st.header("🔍 Data Quality Recommendations")
-    df = st.session_state.df
+    df = st.session_state.get('df', None)
     if df is None:
         st.warning("Upload a dataset first.")
         return
@@ -132,15 +132,12 @@ def section_recommendations():
                 elif rec['type'] == 'auto_pipeline':
                     with col1:
                         if st.button(f"🔍 Preview Auto Pipeline", key=f"preview_auto_{i}", help="Preview the auto pipeline"):
-                            if run_pipeline is None:
-                                st.error("Pipeline preview is not available due to missing dependencies.")
-                                return
                             preview_df, messages = recommender.preview_pipeline(df, rec['pipeline'])
                             st.session_state.last_preview = (preview_df, "\n".join(messages))
                             st.write("**Preview Results**:")
                             for msg in messages:
                                 st.write(msg)
-                            st.dataframe(_arrowize(preview_df.head(10)))
+                            st.dataframe(preview_df.head(10))
                             # Display before/after stats
                             before_stats = compute_basic_stats(df)
                             after_stats = compute_basic_stats(preview_df)
