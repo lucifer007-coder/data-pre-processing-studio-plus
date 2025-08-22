@@ -49,7 +49,7 @@ def validate_pipeline(df: pd.DataFrame, pipeline: List[Dict[str, Any]]) -> Tuple
         "normalize_text": ["columns"],
         "standardize_dates": ["columns"],
         "unit_convert": ["column", "factor"],
-        "outliers": ["columns"],
+        "outliers": ["columns", "method"],
         "duplicates": [],
         "encode": ["columns", "method"],
         "scale": ["columns", "method"],
@@ -80,9 +80,11 @@ def validate_pipeline(df: pd.DataFrame, pipeline: List[Dict[str, Any]]) -> Tuple
             errors.append(f"Step {idx}: Invalid column '{params['column']}'")
         if "target" in params and params["target"] not in df.columns:
             errors.append(f"Step {idx}: Invalid target column '{params['target']}'")
+        if kind == "encode" and params.get("method") == "ordinal" and "ordinal_mappings" not in params:
+            errors.append(f"Step {idx}: Ordinal encoding requires 'ordinal_mappings' parameter")
     return len(errors) == 0, errors
 
-def apply_step(df: pd.DataFrame, step: Dict[str, Any]) -> Tuple[pd.DataFrame, str]:
+def apply_step(df: pd.DataFrame, step: Dict[str, Any], preview: bool = False) -> Tuple[pd.DataFrame, str]:
     """
     Apply a single preprocessing step to the DataFrame.
     Returns (transformed_df, message).
@@ -97,7 +99,8 @@ def apply_step(df: pd.DataFrame, step: Dict[str, Any]) -> Tuple[pd.DataFrame, st
             return df, "Error: Step 'params' must be a dictionary."
         if kind not in STEP_REGISTRY:
             return df, f"Unknown step kind: {kind}"
-        df, msg = STEP_REGISTRY[kind](df, **params)
+        params_with_preview = {**params, "preview": preview}
+        df, msg = STEP_REGISTRY[kind](df, **params_with_preview)
         logger.info(f"Step {kind} took {time.time() - start_time:.2f} seconds")
         return df, msg
     except KeyError as e:
@@ -110,7 +113,7 @@ def apply_step(df: pd.DataFrame, step: Dict[str, Any]) -> Tuple[pd.DataFrame, st
         logger.error(f"Unexpected error in step {kind}: {e}")
         return df, f"Error in step {kind}: {e}"
 
-def run_pipeline(df: pd.DataFrame, pipeline: List[Dict[str, Any]]) -> Tuple[pd.DataFrame, List[str]]:
+def run_pipeline(df: pd.DataFrame, pipeline: List[Dict[str, Any]], preview: bool = False) -> Tuple[pd.DataFrame, List[str]]:
     """
     Apply a sequence of preprocessing steps to the DataFrame.
     Returns (transformed_df, messages).
@@ -119,12 +122,12 @@ def run_pipeline(df: pd.DataFrame, pipeline: List[Dict[str, Any]]) -> Tuple[pd.D
         is_valid, errors = validate_pipeline(df, pipeline)
         if not is_valid:
             return df, [f"Pipeline validation failed: {err}" for err in errors]
-        df = df.copy()
+        df_out = df.copy()
         messages = []
         for idx, step in enumerate(pipeline, start=1):
-            df, msg = apply_step(df, step)
+            df_out, msg = apply_step(df_out, step, preview=preview)
             messages.append(f"{idx}. {msg}")
-        return df, messages
+        return df_out, messages
     except Exception as e:
         logger.error(f"Error running pipeline: {e}")
         return df, [f"Pipeline error: {e}"]
