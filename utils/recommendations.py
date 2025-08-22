@@ -3,7 +3,7 @@ import numpy as np
 from scipy import stats
 import regex as re
 import altair as alt
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from utils.data_utils import dtype_split
 from utils.stats_utils import compute_basic_stats
 from utils.viz_utils import alt_histogram
@@ -44,7 +44,7 @@ class PreprocessingRecommendations:
             missing_by_col = stats.get("missing_by_col", {})
             if missing_by_col:
                 max_missing_ratio = max(v / stats["shape"][0] for v in missing_by_col.values())
-                threshold = max(0.05, min(0.1, 1000 / stats["shape"][0]))  # Dynamic threshold
+                threshold = max(0.05, min(0.1, 1000 / stats["shape"][0]))
                 if max_missing_ratio > threshold:
                     for col, missing_count in missing_by_col.items():
                         missing_ratio = missing_count / stats["shape"][0]
