@@ -13,12 +13,16 @@ from components.sections.scaling import section_scaling
 from components.sections.imbalanced import section_imbalanced
 from components.sections.pipeline_preview import section_pipeline_preview
 from components.sections.dashboard_download import section_dashboard_download
+from session import init_session  # Import init_session
 
 # Fix module imports
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 def main():
     try:
+        # Initialize session state
+        init_session()
+
         st.set_page_config(
             page_title="Data Preprocessing Studio",
             page_icon="🧹",
