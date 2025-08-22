@@ -9,6 +9,12 @@ from utils.stats_utils import compute_basic_stats
 from utils.viz_utils import alt_histogram
 import logging
 
+try:
+    from preprocessing.pipeline import run_pipeline
+except ImportError as e:
+    logging.error(f"Failed to import run_pipeline: {e}")
+    run_pipeline = None  # Fallback to handle import failure
+
 logger = logging.getLogger(__name__)
 
 class PreprocessingRecommendations:
@@ -178,7 +184,7 @@ class PreprocessingRecommendations:
             for rec in [r for r in recommendations if r['type'] == 'outliers']:
                 pipeline_suggestion.append({
                     'kind': 'outliers',
-                    'params': {'columns': [rec['column']], 'method': 'iqr'}
+                    'params': {'columns': [rec['column']], 'method': 'iqr', 'factor': 1.5}
                 })
             # Step 5: Handle skewness
             for rec in [r for r in recommendations if r['type'] == 'skewness']:
@@ -190,7 +196,7 @@ class PreprocessingRecommendations:
             for rec in [r for r in recommendations if r['type'] == 'bias_risk']:
                 pipeline_suggestion.append({
                     'kind': 'rebalance',
-                    'params': {'target': rec['column'], 'method': 'oversample'}
+                    'params': {'target': rec['column'], 'method': 'oversample', 'ratio': 1.0}
                 })
             # Step 7: Handle PII
             for rec in [r for r in recommendations if r['type'] == 'sensitive_data']:
@@ -327,7 +333,8 @@ class PreprocessingRecommendations:
         Returns (preview_df, messages).
         """
         try:
-            from preprocessing.pipeline import run_pipeline
+            if run_pipeline is None:
+                raise ImportError("run_pipeline function is not available")
             preview_df, messages = run_pipeline(df, pipeline, preview=True)
             return preview_df, messages
         except Exception as e:
