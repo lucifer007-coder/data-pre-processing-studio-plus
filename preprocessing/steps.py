@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 from typing import List, Tuple, Optional, Any
 from sklearn.preprocessing import StandardScaler, MinMaxScaler, RobustScaler, LabelEncoder
-import imblearn.over_sampling 
+import imblearn
 from imblearn.over_sampling import SMOTE
 import regex as re
 from utils.data_utils import dtype_split
