@@ -19,6 +19,7 @@ def sidebar_navigation() -> str:
             "Dashboard & Download",
         ],
         help="Choose what you want to work on.",
+        key="navigation"
     )
 
     st.sidebar.markdown("---")
@@ -33,6 +34,6 @@ def sidebar_navigation() -> str:
             st.rerun()
 
     st.sidebar.markdown("---")
-    st.sidebar.caption("Tip: Use 'Add to Pipeline' on each section, then run them together.")
+    st.sidebar.caption("Tip: Upload a CSV file or .dps bundle, add preprocessing steps, export as a .dps bundle to resume later, and run them together.")
 
     return section
