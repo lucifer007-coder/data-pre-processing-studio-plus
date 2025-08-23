@@ -6,4 +6,4 @@ build-backend = "setuptools.build_meta"
 name = "data_preprocessing_studio"
 version = "0.1.0"
 description = "Data preprocessing utilities"
-dependencies = ["streamlit", "pandas", "numpy", "scipy", "altair", "regex", "openpyxl"]
+dependencies = ["streamlit", "pandas", "numpy", "scipy", "altair", "regex", "openpyxl", "wordcloud"]
