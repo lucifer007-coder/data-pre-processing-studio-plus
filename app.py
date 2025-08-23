@@ -13,7 +13,10 @@ from components.sections.scaling import section_scaling
 from components.sections.imbalanced import section_imbalanced
 from components.sections.pipeline_preview import section_pipeline_preview
 from components.sections.dashboard_download import section_dashboard_download
-from session import init_session  # Import init_session
+from components.sections.time_series import section_time_series
+from components.sections.text import section_text
+from components.sections.image import section_image
+from session import init_session
 
 # Fix module imports
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -27,7 +30,7 @@ def main():
             page_title="Data Preprocessing Studio",
             page_icon="🧹",
             layout="wide",
-            initial_sidebar_state="collapsed",   # <-- faster sidebar
+            initial_sidebar_state="collapsed",
         )
 
         section = sidebar_navigation()
@@ -54,6 +57,12 @@ def main():
             section_pipeline_preview()
         elif section == "Dashboard & Download":
             section_dashboard_download()
+        elif section == "Time-Series Preprocessing":
+            section_time_series()
+        elif section == "Text Preprocessing":
+            section_text()
+        elif section == "Image Preprocessing":
+            section_image()
 
         st.markdown("---")
         st.caption(
