@@ -7,3 +7,7 @@ scipy>=1.14.1
 openpyxl
 regex>=2024.7.24
 wordcloud
+matplotlib
+pillow
+openpyxl
+pyarrow
