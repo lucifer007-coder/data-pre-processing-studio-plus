@@ -16,6 +16,12 @@ from preprocessing.steps import (
     type_convert,
     skewness_transform,
     mask_pii,
+    smooth_time_series,
+    resample_time_series,
+    clean_text,
+    extract_tfidf,
+    resize_image,
+    normalize_image,
 )
 
 logger = logging.getLogger(__name__)
@@ -35,6 +41,12 @@ STEP_REGISTRY = {
     "type_convert": type_convert,
     "skewness_transform": skewness_transform,
     "mask_pii": mask_pii,
+    "smooth_time_series": smooth_time_series,
+    "resample_time_series": resample_time_series,
+    "clean_text": clean_text,
+    "extract_tfidf": extract_tfidf,
+    "resize_image": resize_image,
+    "normalize_image": normalize_image,
 }
 
 def validate_pipeline(df: pd.DataFrame, pipeline: List[Dict[str, Any]]) -> Tuple[bool, List[str]]:
@@ -57,6 +69,12 @@ def validate_pipeline(df: pd.DataFrame, pipeline: List[Dict[str, Any]]) -> Tuple
         "type_convert": ["column", "type"],
         "skewness_transform": ["column", "transform"],
         "mask_pii": ["column"],
+        "smooth_time_series": ["column", "window", "method"],
+        "resample_time_series": ["time_column", "freq", "agg_func"],
+        "clean_text": ["column", "remove_stopwords"],
+        "extract_tfidf": ["column", "max_features"],
+        "resize_image": ["column", "width", "height"],
+        "normalize_image": ["column"],
     }
 
     for idx, step in enumerate(pipeline, start=1):
@@ -68,20 +86,26 @@ def validate_pipeline(df: pd.DataFrame, pipeline: List[Dict[str, Any]]) -> Tuple
         if not isinstance(params, dict):
             errors.append(f"Step {idx}: 'params' must be a dictionary")
             continue
-        if kind in required_params:
-            missing = [p for p in required_params[kind] if p not in params]
-            if missing:
-                errors.append(f"Step {idx}: Missing required parameters {missing} for step {kind}")
-        if "columns" in params and params["columns"]:
-            invalid_cols = [c for c in params["columns"] if c not in df.columns]
+        for param in required_params.get(kind, []):
+            if param not in params:
+                errors.append(f"Step {idx}: Missing required parameter '{param}' for step '{kind}'")
+        if kind in ["impute", "normalize_text", "standardize_dates", "outliers", "encode", "scale"]:
+            columns = params.get("columns", [])
+            invalid_cols = [c for c in columns if c not in df.columns]
             if invalid_cols:
-                errors.append(f"Step {idx}: Invalid columns {invalid_cols}")
-        if "column" in params and params["column"] not in df.columns:
-            errors.append(f"Step {idx}: Invalid column '{params['column']}'")
-        if "target" in params and params["target"] not in df.columns:
-            errors.append(f"Step {idx}: Invalid target column '{params['target']}'")
-        if kind == "encode" and params.get("method") == "ordinal" and "ordinal_mappings" not in params:
-            errors.append(f"Step {idx}: Ordinal encoding requires 'ordinal_mappings' parameter")
+                errors.append(f"Step {idx}: Invalid columns {invalid_cols} in step '{kind}'")
+        elif kind in ["unit_convert", "type_convert", "skewness_transform", "mask_pii", "smooth_time_series", "clean_text", "extract_tfidf", "resize_image", "normalize_image"]:
+            column = params.get("column")
+            if column and column not in df.columns:
+                errors.append(f"Step {idx}: Column '{column}' not found in step '{kind}'")
+        elif kind == "resample_time_series":
+            time_column = params.get("time_column")
+            if time_column and time_column not in df.columns:
+                errors.append(f"Step {idx}: Time column '{time_column}' not found in step '{kind}'")
+        elif kind == "rebalance":
+            target = params.get("target")
+            if target and target not in df.columns:
+                errors.append(f"Step {idx}: Target column '{target}' not found in step '{kind}'")
     return len(errors) == 0, errors
 
 def apply_step(df: pd.DataFrame, step: Dict[str, Any], preview: bool = False) -> Tuple[pd.DataFrame, str]:
