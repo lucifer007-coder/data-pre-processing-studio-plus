@@ -22,6 +22,7 @@ from preprocessing.steps import (
     extract_tfidf,
     resize_image,
     normalize_image,
+    extract_domain,
 )
 
 logger = logging.getLogger(__name__)
@@ -47,6 +48,7 @@ STEP_REGISTRY = {
     "extract_tfidf": extract_tfidf,
     "resize_image": resize_image,
     "normalize_image": normalize_image,
+    "extract_domain": extract_domain,
 }
 
 def validate_pipeline(df: pd.DataFrame, pipeline: List[Dict[str, Any]]) -> Tuple[bool, List[str]]:
@@ -67,45 +69,45 @@ def validate_pipeline(df: pd.DataFrame, pipeline: List[Dict[str, Any]]) -> Tuple
         "scale": ["columns", "method"],
         "rebalance": ["target", "method"],
         "type_convert": ["column", "type"],
-        "skewness_transform": ["column", "transform"],
-        "mask_pii": ["column"],
-        "smooth_time_series": ["column", "window", "method"],
-        "resample_time_series": ["time_column", "freq", "agg_func"],
-        "clean_text": ["column", "remove_stopwords"],
-        "extract_tfidf": ["column", "max_features"],
+        "skewness_transform": ["columns", "method"],
+        "mask_pii": ["columns"],
+        "smooth_time_series": ["column", "method"],
+        "resample_time_series": ["time_column", "freq"],
+        "clean_text": ["column"],
+        "extract_tfidf": ["column"],
         "resize_image": ["column", "width", "height"],
         "normalize_image": ["column"],
+        "extract_domain": ["column"],
     }
-
-    for idx, step in enumerate(pipeline, start=1):
-        kind = step.get("kind", "unknown")
-        params = step.get("params", {})
+    for step in pipeline:
+        kind = step.get("kind")
+        if not kind:
+            errors.append("Step 'kind' not specified.")
+            continue
         if kind not in STEP_REGISTRY:
-            errors.append(f"Step {idx}: Unknown step kind '{kind}'")
+            errors.append(f"Unknown step kind: {kind}")
             continue
+        params = step.get("params", {})
         if not isinstance(params, dict):
-            errors.append(f"Step {idx}: 'params' must be a dictionary")
+            errors.append(f"Step {kind}: 'params' must be a dictionary.")
             continue
-        for param in required_params.get(kind, []):
-            if param not in params:
-                errors.append(f"Step {idx}: Missing required parameter '{param}' for step '{kind}'")
-        if kind in ["impute", "normalize_text", "standardize_dates", "outliers", "encode", "scale"]:
-            columns = params.get("columns", [])
-            invalid_cols = [c for c in columns if c not in df.columns]
-            if invalid_cols:
-                errors.append(f"Step {idx}: Invalid columns {invalid_cols} in step '{kind}'")
-        elif kind in ["unit_convert", "type_convert", "skewness_transform", "mask_pii", "smooth_time_series", "clean_text", "extract_tfidf", "resize_image", "normalize_image"]:
-            column = params.get("column")
-            if column and column not in df.columns:
-                errors.append(f"Step {idx}: Column '{column}' not found in step '{kind}'")
-        elif kind == "resample_time_series":
-            time_column = params.get("time_column")
-            if time_column and time_column not in df.columns:
-                errors.append(f"Step {idx}: Time column '{time_column}' not found in step '{kind}'")
-        elif kind == "rebalance":
-            target = params.get("target")
-            if target and target not in df.columns:
-                errors.append(f"Step {idx}: Target column '{target}' not found in step '{kind}'")
+        missing_params = [p for p in required_params.get(kind, []) if p not in params]
+        if missing_params:
+            errors.append(f"Step {kind}: Missing required parameters: {', '.join(missing_params)}")
+        if "column" in params and params["column"] not in df.columns:
+            errors.append(f"Step {kind}: Column {params['column']} not found in DataFrame.")
+        if "columns" in params and not all(c in df.columns for c in params["columns"]):
+            errors.append(f"Step {kind}: Some columns not found in DataFrame.")
+        if kind == "encode" and params.get("method") == "target" and "target_column" not in params:
+            errors.append(f"Step {kind}: Target column required for target encoding.")
+        if kind == "encode" and params.get("method") == "ordinal" and "ordinal_mappings" not in params:
+            errors.append(f"Step {kind}: Ordinal mappings required for ordinal encoding.")
+        if kind == "impute" and params.get("strategy") == "knn" and "n_neighbors" not in params:
+            errors.append(f"Step {kind}: n_neighbors required for KNN imputation.")
+        if kind == "impute" and params.get("strategy") == "random_forest" and "n_estimators" not in params:
+            errors.append(f"Step {kind}: n_estimators required for Random Forest imputation.")
+        if kind == "impute" and params.get("strategy") == "constant" and "constant_value" not in params:
+            errors.append(f"Step {kind}: constant_value required for constant imputation.")
     return len(errors) == 0, errors
 
 def apply_step(df: pd.DataFrame, step: Dict[str, Any], preview: bool = False) -> Tuple[pd.DataFrame, str]:
