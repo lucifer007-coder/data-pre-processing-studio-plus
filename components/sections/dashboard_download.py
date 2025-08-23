@@ -293,18 +293,69 @@ def section_dashboard_download():
                 for i, msg in enumerate(st.session_state.changelog, start=1):
                     st.write(f"{i}. {msg}")
 
-        # ── 8. Download section ------------------------------------
+        # Download section
         st.markdown("---")
         st.subheader("Download Processed Data")
-        buf = io.StringIO()
-        df.to_csv(buf, index=False)
-        st.download_button(
-            "💾 Download CSV",
-            data=buf.getvalue(),
-            file_name="preprocessed_data.csv",
-            mime="text/csv",
-            help="Download the final processed dataset as a CSV file.",
-        )
+        st.warning("Note: Exported files contain plain-text data, including any PII from the original dataset. Store them securely.")
+        
+        if df.empty:
+            st.error("Cannot export an empty dataset.")
+        else:
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                # CSV export
+                buf = io.StringIO()
+                df.to_csv(buf, index=False)
+                st.download_button(
+                    "💾 Download CSV",
+                    data=buf.getvalue(),
+                    file_name="preprocessed_data.csv",
+                    mime="text/csv",
+                    help="Download the processed dataset as a CSV file."
+                )
+            with col2:
+                # Parquet export
+                buf = io.BytesIO()
+                try:
+                    df.to_parquet(buf, index=False, engine='pyarrow')
+                    st.download_button(
+                        "💾 Parquet",
+                        data=buf.getvalue(),
+                        file_name="preprocessed_data.parquet",
+                        mime="application/octet-stream",
+                        help="Download the processed dataset as a Parquet file."
+                    )
+                except Exception as e:
+                    st.error(f"Failed to export Parquet: {e}")
+            with col3:
+                # Excel export
+                buf = io.BytesIO()
+                try:
+                    df.to_excel(buf, index=False, engine='openpyxl')
+                    st.download_button(
+                        "📊 Excel",
+                        data=buf.getvalue(),
+                        file_name="preprocessed_data.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        help="Download the processed dataset as an Excel (.xlsx) file."
+                    )
+                except Exception as e:
+                    st.error(f"Failed to export Excel: {e}")
+            with col4:
+                # Feather export
+                buf = io.BytesIO()
+                try:
+                    df.to_feather(buf, compression='zstd')
+                    st.download_button(
+                        "⚡ Feather",
+                        data=buf.getvalue(),
+                        file_name="preprocessed_data.feather",
+                        mime="application/octet-stream",
+                        help="Download the processed dataset as a Feather file."
+                    )
+                except Exception as e:
+                    st.error(f"Failed to export Feather: {e}")
+
         st.caption("All processing happens in your browser session.")
     except Exception as e:
         st.error(f"Error in dashboard section: {e}")
