@@ -4,7 +4,7 @@ import numpy as np
 import streamlit as st
 import altair as alt
 from typing import Optional
-from wordcloud import WordCloud
+import wordcloud
 import matplotlib.pyplot as plt
 
 logger = logging.getLogger(__name__)
