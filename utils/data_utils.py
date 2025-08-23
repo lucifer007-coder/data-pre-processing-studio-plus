@@ -1,7 +1,9 @@
 import pandas as pd
 import numpy as np
-from typing import List, Tuple
 from config import RANDOM_STATE, PREVIEW_ROWS
+import logging
+
+logger = logging.getLogger(__name__)
 
 def _arrowize(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -17,15 +19,11 @@ def _arrowize(df: pd.DataFrame) -> pd.DataFrame:
         inferred = pd.api.types.infer_dtype(s, skipna=True)
 
         # CASE 1: numeric column that slipped into 'object' dtype
-        # (usually because of strings such as 'NA', 'NULL', etc.)
         if inferred in ("mixed", "string", "mixed-integer"):
-            # Try to parse as float; unparseable values become NaN
             parsed = pd.to_numeric(s, errors="coerce")
-            # If at least one value survived, cast the column
             if parsed.notna().any():
                 df_out[col] = parsed.astype("float64")
             else:
-                # Fallback: plain string
                 df_out[col] = s.astype(str)
 
         # CASE 2: Boolean columns might be "True"/"False" strings
@@ -50,7 +48,7 @@ def sample_for_preview(df: pd.DataFrame, n: int = PREVIEW_ROWS) -> pd.DataFrame:
         logger.error(f"Error in sample_for_preview: {e}")
         return df if df is not None else pd.DataFrame()
 
-def dtype_split(df: pd.DataFrame) -> Tuple[List[str], List[str]]:
+def dtype_split(df: pd.DataFrame) -> tuple[list[str], list[str]]:
     """Return (numeric_columns, categorical_columns)."""
     if not isinstance(df, pd.DataFrame):
         raise TypeError("Input must be a pandas DataFrame")
