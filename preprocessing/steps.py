@@ -4,6 +4,8 @@ import pandas as pd
 import numpy as np
 from typing import List, Tuple, Optional, Any, Dict
 from sklearn.preprocessing import StandardScaler, MinMaxScaler, RobustScaler, LabelEncoder
+from sklearn.impute import KNNImputer
+from sklearn.ensemble import RandomForestRegressor
 from sklearn.feature_extraction.text import TfidfVectorizer
 import regex as re
 from scipy.signal import savgol_filter
@@ -17,6 +19,8 @@ import base64
 import nltk
 from utils.data_utils import dtype_split
 import streamlit as st
+import urllib.parse
+import hashlib
 
 logger = logging.getLogger(__name__)
 
@@ -43,11 +47,22 @@ def impute_missing(
     columns: List[str],
     strategy: str = "mean",
     constant_value: Optional[Any] = None,
+    n_neighbors: int = 5,
+    n_estimators: int = 100,
     preview: bool = False,
 ) -> Tuple[pd.DataFrame, str]:
     """
     Impute missing values in specified columns using the given strategy.
-    Returns (transformed_df, message).
+    Args:
+        df: Input DataFrame.
+        columns: List of columns to impute.
+        strategy: Imputation strategy ('mean', 'median', 'mode', 'constant', 'ffill', 'bfill', 'knn', 'random_forest').
+        constant_value: Value to use for constant strategy.
+        n_neighbors: Number of neighbors for KNN imputation.
+        n_estimators: Number of trees for Random Forest imputation.
+        preview: If True, return a copy without modifying the original.
+    Returns:
+        (transformed_df, message)
     """
     start_time = time.time()
     try:
@@ -59,46 +74,226 @@ def impute_missing(
         df_out = df if preview else df.copy()
         num_cols, cat_cols = dtype_split(df_out)
         imputed_cols = []
+
         if strategy in ("mean", "median"):
-            target_cols = [c for c in valid_cols if c in num_cols]
-            if target_cols:
-                values = df_out[target_cols].agg(strategy).to_dict()
-                for c in target_cols:
-                    if df_out[c].isna().all():
-                        continue
-                    imputed_count = df_out[c].isna().sum()
-                    df_out[c] = df_out[c].fillna(values[c])
-                    imputed_cols.append(f"{c} ({imputed_count} values with {strategy}={values[c]:.2f})")
-                msg = f"Imputed {len(target_cols)} numeric columns: {', '.join(imputed_cols)}"
-            else:
-                msg = "No numeric columns selected for mean/median imputation."
+            for col in valid_cols:
+                if col in num_cols:
+                    if strategy == "mean":
+                        value = df_out[col].mean()
+                    else:
+                        value = df_out[col].median()
+                    df_out[col] = df_out[col].fillna(value)
+                    imputed_cols.append(col)
         elif strategy == "mode":
-            for c in valid_cols:
-                mode = df_out[c].mode(dropna=True)
-                if not mode.empty:
-                    imputed_count = df_out[c].isna().sum()
-                    df_out[c] = df_out[c].fillna(mode.iloc[0])
-                    imputed_cols.append(f"{c} ({imputed_count} values with mode={mode.iloc[0]})")
-                msg = f"Imputed {len(valid_cols)} columns with mode: {', '.join(imputed_cols)}"
+            for col in valid_cols:
+                value = df_out[col].mode().iloc[0] if not df_out[col].mode().empty else np.nan
+                df_out[col] = df_out[col].fillna(value)
+                imputed_cols.append(col)
         elif strategy == "constant":
-            for c in valid_cols:
-                imputed_count = df_out[c].isna().sum()
-                df_out[c] = df_out[c].fillna(constant_value)
-                imputed_cols.append(f"{c} ({imputed_count} values with constant={constant_value})")
-            msg = f"Imputed {len(valid_cols)} columns with constant value: {', '.join(imputed_cols)}"
+            if constant_value is None:
+                return df, "Constant value must be provided for constant strategy."
+            for col in valid_cols:
+                df_out[col] = df_out[col].fillna(constant_value)
+                imputed_cols.append(col)
         elif strategy in ("ffill", "bfill"):
-            for c in valid_cols:
-                imputed_count = df_out[c].isna().sum()
-                df_out[c] = df_out[c].ffill() if strategy == "ffill" else df_out[c].bfill()
-                imputed_cols.append(f"{c} ({imputed_count} values with {strategy})")
-            msg = f"Imputed {len(valid_cols)} columns with {strategy}: {', '.join(imputed_cols)}"
+            for col in valid_cols:
+                df_out[col] = df_out[col].fillna(method=strategy)
+                imputed_cols.append(col)
+        elif strategy == "knn":
+            valid_num_cols = [c for c in valid_cols if c in num_cols]
+            if not valid_num_cols:
+                return df, "KNN imputation requires at least one numeric column."
+            if len(df_out) < n_neighbors:
+                return df, f"Number of samples ({len(df_out)}) is less than n_neighbors ({n_neighbors})."
+            imputer = KNNImputer(n_neighbors=n_neighbors, weights="uniform")
+            imputed_data = imputer.fit_transform(df_out[valid_num_cols])
+            df_out[valid_num_cols] = pd.DataFrame(imputed_data, columns=valid_num_cols, index=df_out.index)
+            imputed_cols.extend(valid_num_cols)
+        elif strategy == "random_forest":
+            valid_num_cols = [c for c in valid_cols if c in num_cols]
+            if not valid_num_cols:
+                return df, "Random Forest imputation requires at least one numeric column."
+            for col in valid_num_cols:
+                if df_out[col].isna().sum() == 0:
+                    continue
+                # Features: other numeric columns without missing values
+                feature_cols = [c for c in num_cols if c != col and df_out[c].isna().sum() == 0]
+                if not feature_cols:
+                    logger.warning(f"No valid features for Random Forest imputation of {col}.")
+                    continue
+                mask = df_out[col].isna()
+                if mask.sum() == len(df_out):
+                    logger.warning(f"All values in {col} are missing.")
+                    continue
+                # Train on non-missing data
+                train_data = df_out[~mask][feature_cols]
+                train_target = df_out[~mask][col]
+                if len(train_data) < 10:
+                    logger.warning(f"Insufficient non-missing data in {col} for Random Forest imputation.")
+                    continue
+                model = RandomForestRegressor(n_estimators=n_estimators, random_state=42)
+                model.fit(train_data, train_target)
+                # Predict missing values
+                test_data = df_out[mask][feature_cols]
+                if not test_data.empty:
+                    df_out.loc[mask, col] = model.predict(test_data)
+                imputed_cols.append(col)
         else:
-            return df, f"Unsupported strategy: {strategy}."
-        logger.info(f"impute_missing took {time.time() - start_time:.2f} seconds")
+            return df, f"Unsupported imputation strategy: {strategy}"
+
+        msg = f"Imputed missing values in {len(imputed_cols)} columns using {strategy} strategy."
+        logger.info(f"{msg} ({time.time() - start_time:.2f} seconds)")
         return df_out, msg
     except Exception as e:
         logger.error(f"Error in impute_missing: {e}")
-        return df, f"Error in imputation: {e}"
+        return df, f"Error imputing missing values: {e}"
+
+def encode_categorical(
+    df: pd.DataFrame,
+    columns: List[str],
+    method: str = "onehot",
+    max_categories: Optional[int] = None,
+    group_rare: bool = False,
+    ordinal_mappings: Optional[Dict] = None,
+    target_column: Optional[str] = None,
+    n_components: int = 8,
+    preview: bool = False
+) -> Tuple[pd.DataFrame, str]:
+    """
+    Encode categorical columns using one-hot, label, ordinal, target, frequency, or hashing encoding.
+    """
+    try:
+        if not columns:
+            return df, "No columns selected for encoding."
+        valid_cols = [c for c in columns if c in df.columns]
+        if not valid_cols:
+            return df, "No valid columns selected for encoding."
+        df_out = df if preview else df.copy()
+
+        if method == "target" and (target_column is None or target_column not in df.columns):
+            return df, "Target column required for target encoding."
+        if method == "ordinal" and not ordinal_mappings:
+            return df, "Ordinal mappings required for ordinal encoding."
+
+        processed_cols = []
+        for col in valid_cols:
+            if max_categories and group_rare:
+                top_categories = df_out[col].value_counts().head(max_categories).index
+                df_out[col] = df_out[col].where(df_out[col].isin(top_categories), "Rare")
+
+            if method == "onehot":
+                if max_categories and not group_rare:
+                    top_categories = df_out[col].value_counts().head(max_categories).index
+                    df_out[col] = df_out[col].where(df_out[col].isin(top_categories), "Other")
+                dummies = pd.get_dummies(df_out[col], prefix=col, dummy_na=False)
+                df_out = df_out.drop(columns=[col]).join(dummies)
+                processed_cols.append(col)
+            elif method == "label":
+                le = LabelEncoder()
+                df_out[col] = le.fit_transform(df_out[col].astype(str))
+                processed_cols.append(col)
+            elif method == "ordinal":
+                if col in ordinal_mappings:
+                    df_out[col] = df_out[col].map(ordinal_mappings[col])
+                    processed_cols.append(col)
+            elif method == "target":
+                target_means = df_out.groupby(col)[target_column].mean()
+                df_out[col] = df_out[col].map(target_means)
+                processed_cols.append(col)
+            elif method == "frequency":
+                freq = df_out[col].value_counts(normalize=True)
+                df_out[col] = df_out[col].map(freq)
+                processed_cols.append(col)
+            elif method == "hashing":
+                def hash_category(value):
+                    if pd.isna(value):
+                        return np.nan
+                    return int(hashlib.md5(str(value).encode()).hexdigest(), 16) % n_components
+                df_out[col] = df_out[col].apply(hash_category)
+                processed_cols.append(col)
+            else:
+                return df, f"Unsupported encoding method: {method}"
+
+        msg = f"Encoded {len(processed_cols)} columns using {method} method" + \
+              (f" with {max_categories} max categories" if max_categories else "") + \
+              (f" and rare grouping" if group_rare else "") + \
+              (f" targeting {target_column}" if target_column else "")
+        logger.info(msg)
+        return df_out, msg
+    except Exception as e:
+        logger.error(f"Error in encode_categorical: {e}")
+        return df, f"Error encoding categorical columns: {e}"
+
+def scale_features(
+    df: pd.DataFrame,
+    columns: List[str],
+    method: str = "standard",
+    keep_original: bool = False,
+    preview: bool = False
+) -> Tuple[pd.DataFrame, str]:
+    """
+    Scale numeric features using StandardScaler, MinMaxScaler, or RobustScaler.
+    """
+    try:
+        if not columns:
+            return df, "No columns selected for scaling."
+        valid_cols = [c for c in columns if c in df.columns and pd.api.types.is_numeric_dtype(df[c])]
+        if not valid_cols:
+            return df, "No valid numeric columns selected for scaling."
+        df_out = df if preview else df.copy()
+        if method == "standard":
+            scaler = StandardScaler()
+        elif method == "minmax":
+            scaler = MinMaxScaler()
+        elif method == "robust":
+            scaler = RobustScaler()
+        else:
+            return df, f"Unsupported scaling method: {method}"
+        scaled = scaler.fit_transform(df_out[valid_cols])
+        if keep_original:
+            new_cols = [f"{col}_scaled" for col in valid_cols]
+            df_out[new_cols] = pd.DataFrame(scaled, index=df_out.index, columns=new_cols)
+        else:
+            df_out[valid_cols] = pd.DataFrame(scaled, index=df_out.index, columns=valid_cols)
+        msg = f"Scaled {len(valid_cols)} columns using {method} scaler."
+        logger.info(msg)
+        return df_out, msg
+    except Exception as e:
+        logger.error(f"Error in scale_features: {e}")
+        return df, f"Error scaling features: {e}"
+
+def extract_domain(df: pd.DataFrame, column: str, new_name: Optional[str] = None, preview: bool = False) -> Tuple[pd.DataFrame, str]:
+    """
+    Extract domains from URLs in the specified column.
+    """
+    try:
+        if column not in df.columns:
+            return df, f"Column {column} not found."
+        df_out = df if preview else df.copy()
+        url_pattern = r'^(https?://|file://|ftp://)'
+        valid_urls = df_out[column].astype(str).str.contains(url_pattern, na=False)
+        if not valid_urls.any():
+            return df, f"No valid URLs in {column}."
+
+        def get_domain(url):
+            try:
+                if pd.isna(url) or not isinstance(url, str):
+                    return np.nan
+                parsed = urllib.parse.urlparse(url)
+                return parsed.netloc if parsed.netloc else np.nan
+            except Exception:
+                return np.nan
+
+        new_col = df_out[column].apply(get_domain)
+        target_col = new_name if new_name else column
+        df_out[target_col] = new_col
+        processed_count = valid_urls.sum()
+        msg = f"Extracted domains for {processed_count} URLs in {column} to {target_col}."
+        logger.info(msg)
+        return df_out, msg
+    except Exception as e:
+        logger.error(f"Error in extract_domain: {e}")
+        return df, f"Error extracting domains: {e}"
 
 def drop_missing(
     df: pd.DataFrame,
@@ -112,27 +307,40 @@ def drop_missing(
     """
     try:
         df_out = df if preview else df.copy()
-        if axis == "rows":
-            if threshold:
-                missing_ratio = df_out.isna().mean(axis=1)
-                drop_count = len(df_out[missing_ratio > threshold])
-                df_out = df_out[missing_ratio <= threshold]
-                msg = f"Dropped {drop_count} rows with missing ratio > {threshold}."
+        if axis not in ["rows", "columns"]:
+            return df, f"Invalid axis: {axis}. Use 'rows' or 'columns'."
+        if columns:
+            valid_cols = [c for c in columns if c in df_out.columns]
+            if not valid_cols:
+                return df, "No valid columns selected for dropping."
+            if axis == "rows":
+                mask = df_out[valid_cols].isna().any(axis=1)
+                initial_rows = len(df_out)
+                df_out = df_out[~mask]
+                dropped = initial_rows - len(df_out)
+                msg = f"Dropped {dropped} rows with missing values in {len(valid_cols)} columns."
             else:
-                columns = columns or df_out.columns.tolist()
-                drop_count = len(df_out) - len(df_out.dropna(subset=columns))
-                df_out = df_out.dropna(subset=columns)
-                msg = f"Dropped {drop_count} rows with missing values in {', '.join(columns)}."
-        else:  # axis == "columns"
-            if threshold:
-                missing_ratio = df_out.isna().mean()
-                cols_to_drop = missing_ratio[missing_ratio > threshold].index.tolist()
-                df_out = df_out.drop(columns=cols_to_drop)
-                msg = f"Dropped {len(cols_to_drop)} columns with missing ratio > {threshold}: {', '.join(cols_to_drop)}."
+                df_out = df_out.drop(columns=valid_cols)
+                msg = f"Dropped {len(valid_cols)} columns: {', '.join(valid_cols)}."
+        elif threshold is not None:
+            if not 0 <= threshold <= 1:
+                return df, "Threshold must be between 0 and 1."
+            if axis == "rows":
+                mask = df_out.isna().mean(axis=1) <= threshold
+                initial_rows = len(df_out)
+                df_out = df_out[mask]
+                dropped = initial_rows - len(df_out)
+                msg = f"Dropped {dropped} rows with missing ratio > {threshold}."
             else:
-                columns = columns or df_out.columns.tolist()
-                df_out = df_out.drop(columns=columns)
-                msg = f"Dropped {len(columns)} columns: {', '.join(columns)}."
+                mask = df_out.isna().mean() <= threshold
+                dropped_cols = df_out.columns[~mask]
+                df_out = df_out.loc[:, mask]
+                msg = f"Dropped {len(dropped_cols)} columns with missing ratio > {threshold}: {', '.join(dropped_cols)}."
+        else:
+            initial_shape = df_out.shape
+            df_out = df_out.dropna(axis=0 if axis == "rows" else 1)
+            dropped = initial_shape[0 if axis == "rows" else 1] - df_out.shape[0 if axis == "rows" else 1]
+            msg = f"Dropped {dropped} {axis} with missing values."
         logger.info(msg)
         return df_out, msg
     except Exception as e:
@@ -144,30 +352,34 @@ def normalize_text(
     columns: List[str],
     lowercase: bool = True,
     trim: bool = True,
-    collapse_spaces: bool = True,
+    collapse: bool = True,
     remove_special: bool = False,
     preview: bool = False
 ) -> Tuple[pd.DataFrame, str]:
     """
-    Normalize text columns.
+    Normalize text in specified columns.
     """
     try:
+        if not columns:
+            return df, "No columns selected for text normalization."
         valid_cols = [c for c in columns if c in df.columns]
         if not valid_cols:
             return df, "No valid columns selected for text normalization."
         df_out = df if preview else df.copy()
+        processed_cols = []
         for col in valid_cols:
             series = df_out[col].astype(str)
             if lowercase:
                 series = series.str.lower()
             if trim:
                 series = series.str.strip()
-            if collapse_spaces:
+            if collapse:
                 series = series.str.replace(r'\s+', ' ', regex=True)
             if remove_special:
-                series = series.str.replace(r'[^\w\s]', '', regex=True)
+                series = series.str.replace(r'[^a-zA-Z0-9\s]', '', regex=True)
             df_out[col] = series
-        msg = f"Normalized text in {', '.join(valid_cols)} with options: lowercase={lowercase}, trim={trim}, collapse_spaces={collapse_spaces}, remove_special={remove_special}."
+            processed_cols.append(col)
+        msg = f"Normalized text in {len(processed_cols)} columns: lowercase={lowercase}, trim={trim}, collapse={collapse}, remove_special={remove_special}."
         logger.info(msg)
         return df_out, msg
     except Exception as e:
@@ -177,20 +389,27 @@ def normalize_text(
 def standardize_dates(
     df: pd.DataFrame,
     columns: List[str],
-    output_format: str = "YYYY-MM-DD",
+    format: str = "%Y-%m-%d",
     preview: bool = False
 ) -> Tuple[pd.DataFrame, str]:
     """
-    Standardize date columns to a specified format.
+    Standardize date formats in specified columns.
     """
     try:
+        if not columns:
+            return df, "No columns selected for date standardization."
         valid_cols = [c for c in columns if c in df.columns]
         if not valid_cols:
             return df, "No valid columns selected for date standardization."
         df_out = df if preview else df.copy()
+        processed_cols = []
         for col in valid_cols:
-            df_out[col] = pd.to_datetime(df_out[col], errors='coerce').dt.strftime(output_format)
-        msg = f"Standardized dates in {', '.join(valid_cols)} to format {output_format}."
+            try:
+                df_out[col] = pd.to_datetime(df_out[col], errors='coerce').dt.strftime(format)
+                processed_cols.append(col)
+            except Exception as e:
+                logger.warning(f"Failed to standardize dates in {col}: {e}")
+        msg = f"Standardized dates in {len(processed_cols)} columns to format {format}."
         logger.info(msg)
         return df_out, msg
     except Exception as e:
@@ -205,24 +424,54 @@ def unit_convert(
     preview: bool = False
 ) -> Tuple[pd.DataFrame, str]:
     """
-    Convert units in a numeric column by multiplying by a factor.
+    Convert units in a numeric or string column by multiplying by a factor.
     """
     try:
         if column not in df.columns:
             return df, f"Column {column} not found."
-        if not pd.api.types.is_numeric_dtype(df[column]):
-            return df, f"Column {column} is not numeric."
+        if factor == 0:
+            return df, "Conversion factor cannot be zero."
         df_out = df if preview else df.copy()
-        target_col = new_name or column
-        df_out[target_col] = df_out[column] * factor
-        if new_name and new_name != column:
-            df_out = df_out.drop(columns=[column])
-        msg = f"Converted units in {column} by factor {factor} {'to new column ' + new_name if new_name else ''}."
+        target_col = new_name if new_name else column
+        if pd.api.types.is_string_dtype(df_out[column]):
+            series = df_out[column].astype(str).str.replace(r'[^\d.]', '', regex=True)
+            series = pd.to_numeric(series, errors='coerce') * factor
+        else:
+            series = df_out[column] * factor
+        df_out[target_col] = series
+        msg = f"Converted units in {column} by factor {factor} to {target_col}."
         logger.info(msg)
         return df_out, msg
     except Exception as e:
         logger.error(f"Error in unit_convert: {e}")
-        return df, f"Error in unit conversion: {e}"
+        return df, f"Error converting units: {e}"
+
+def type_convert(
+    df: pd.DataFrame,
+    column: str,
+    type: str,
+    preview: bool = False
+) -> Tuple[pd.DataFrame, str]:
+    """
+    Convert the type of a column (e.g., to bool, category).
+    """
+    try:
+        if column not in df.columns:
+            return df, f"Column {column} not found."
+        df_out = df if preview else df.copy()
+        if type == "bool":
+            df_out[column] = df_out[column].astype(bool)
+            msg = f"Converted {column} to boolean."
+        elif type == "category":
+            df_out[column] = df_out[column].astype('category')
+            msg = f"Converted {column} to category."
+        else:
+            return df, f"Unsupported type: {type}"
+        logger.info(msg)
+        return df_out, msg
+    except Exception as e:
+        logger.error(f"Error in type_convert: {e}")
+        return df, f"Error converting type: {e}"
 
 def handle_outliers(
     df: pd.DataFrame,
@@ -232,28 +481,31 @@ def handle_outliers(
     preview: bool = False
 ) -> Tuple[pd.DataFrame, str]:
     """
-    Handle outliers using IQR or Z-score method.
+    Handle outliers in specified columns using IQR or Z-score.
     """
     try:
-        valid_cols = [c for c in columns if c in df.columns and pd.api.types.is_numeric_dtype(df[c])]
+        if not columns:
+            return df, "No columns selected for outlier handling."
+        valid_cols = [c for c in columns if c in df.columns]
         if not valid_cols:
-            return df, "No valid numeric columns selected for outlier handling."
+            return df, "No valid columns selected for outlier handling."
         df_out = df if preview else df.copy()
+        processed_cols = []
         for col in valid_cols:
+            if not pd.api.types.is_numeric_dtype(df_out[col]):
+                continue
             if method == "iqr":
-                q1, q3 = df_out[col].quantile([0.25, 0.75])
+                q1 = df_out[col].quantile(0.25)
+                q3 = df_out[col].quantile(0.75)
                 iqr = q3 - q1
-                lower, upper = q1 - factor * iqr, q3 + factor * iqr
-                outliers = (df_out[col] < lower) | (df_out[col] > upper)
-                df_out.loc[outliers, col] = df_out[col].clip(lower, upper)
-                msg = f"Handled outliers in {', '.join(valid_cols)} using IQR with factor {factor}."
+                lower_bound = q1 - factor * iqr
+                upper_bound = q3 + factor * iqr
+                df_out[col] = df_out[col].clip(lower=lower_bound, upper=upper_bound)
             elif method == "zscore":
                 z_scores = np.abs((df_out[col] - df_out[col].mean()) / df_out[col].std())
-                outliers = z_scores > factor
-                df_out.loc[outliers, col] = df_out[col].clip(df_out[col].mean() - factor * df_out[col].std(), df_out[col].mean() + factor * df_out[col].std())
-                msg = f"Handled outliers in {', '.join(valid_cols)} using Z-score with threshold {factor}."
-            else:
-                return df, f"Unsupported outlier method: {method}."
+                df_out[col] = df_out[col].where(z_scores <= factor, np.nan)
+            processed_cols.append(col)
+        msg = f"Handled outliers in {len(processed_cols)} columns using {method} method."
         logger.info(msg)
         return df_out, msg
     except Exception as e:
@@ -271,97 +523,19 @@ def remove_duplicates(
     """
     try:
         df_out = df if preview else df.copy()
-        subset = subset or df_out.columns.tolist()
-        valid_cols = [c for c in subset if c in df_out.columns]
-        if not valid_cols:
+        initial_rows = len(df_out)
+        valid_subset = [c for c in (subset or df.columns) if c in df.columns]
+        if not valid_subset:
             return df, "No valid columns selected for duplicate removal."
-        drop_count = len(df_out) - len(df_out.drop_duplicates(subset=valid_cols, keep=keep))
-        df_out = df_out.drop_duplicates(subset=valid_cols, keep=keep)
-        msg = f"Removed {drop_count} duplicate rows based on {', '.join(valid_cols)} (keep={keep})."
+        keep = False if keep == "False" else keep
+        df_out = df_out.drop_duplicates(subset=valid_subset, keep=keep)
+        dropped = initial_rows - len(df_out)
+        msg = f"Removed {dropped} duplicate rows based on {len(valid_subset)} columns."
         logger.info(msg)
         return df_out, msg
     except Exception as e:
         logger.error(f"Error in remove_duplicates: {e}")
         return df, f"Error removing duplicates: {e}"
-
-def encode_categorical(
-    df: pd.DataFrame,
-    columns: List[str],
-    method: str = "onehot",
-    max_categories: Optional[int] = None,
-    ordinal_mappings: Optional[Dict[str, Dict]] = None,
-    preview: bool = False
-) -> Tuple[pd.DataFrame, str]:
-    """
-    Encode categorical columns using one-hot, label, or ordinal encoding.
-    """
-    try:
-        valid_cols = [c for c in columns if c in df.columns]
-        if not valid_cols:
-            return df, "No valid columns selected for encoding."
-        df_out = df if preview else df.copy()
-        if method == "onehot":
-            for col in valid_cols:
-                if max_categories:
-                    top_cats = df_out[col].value_counts().nlargest(max_categories).index
-                    df_out[col] = df_out[col].where(df_out[col].isin(top_cats), "Other")
-                dummies = pd.get_dummies(df_out[col], prefix=col, drop_first=True)
-                df_out = pd.concat([df_out.drop(columns=[col]), dummies], axis=1)
-            msg = f"One-hot encoded {', '.join(valid_cols)} {'with max_categories=' + str(max_categories) if max_categories else ''}."
-        elif method == "label":
-            for col in valid_cols:
-                le = LabelEncoder()
-                df_out[col] = le.fit_transform(df_out[col].astype(str))
-            msg = f"Label encoded {', '.join(valid_cols)}."
-        elif method == "ordinal":
-            if not ordinal_mappings:
-                return df, "Ordinal encoding requires mappings."
-            for col in valid_cols:
-                if col in ordinal_mappings:
-                    df_out[col] = df_out[col].map(ordinal_mappings[col]).fillna(df_out[col])
-            msg = f"Ordinal encoded {', '.join(valid_cols)}."
-        else:
-            return df, f"Unsupported encoding method: {method}."
-        logger.info(msg)
-        return df_out, msg
-    except Exception as e:
-        logger.error(f"Error in encode_categorical: {e}")
-        return df, f"Error encoding categorical data: {e}"
-
-def scale_features(
-    df: pd.DataFrame,
-    columns: List[str],
-    method: str = "standard",
-    keep_original: bool = False,
-    preview: bool = False
-) -> Tuple[pd.DataFrame, str]:
-    """
-    Scale numeric features using standard, minmax, or robust scaling.
-    """
-    try:
-        valid_cols = [c for c in columns if c in df.columns and pd.api.types.is_numeric_dtype(df[c])]
-        if not valid_cols:
-            return df, "No valid numeric columns selected for scaling."
-        df_out = df if preview else df.copy()
-        if method == "standard":
-            scaler = StandardScaler()
-        elif method == "minmax":
-            scaler = MinMaxScaler()
-        elif method == "robust":
-            scaler = RobustScaler()
-        else:
-            return df, f"Unsupported scaling method: {method}."
-        scaled = scaler.fit_transform(df_out[valid_cols])
-        new_cols = [f"{col}_scaled" for col in valid_cols] if keep_original else valid_cols
-        df_out[new_cols] = pd.DataFrame(scaled, index=df_out.index, columns=new_cols)
-        if not keep_original:
-            df_out = df_out.drop(columns=valid_cols)
-        msg = f"Scaled {', '.join(valid_cols)} using {method} scaling {'(kept original columns)' if keep_original else ''}."
-        logger.info(msg)
-        return df_out, msg
-    except Exception as e:
-        logger.error(f"Error in scale_features: {e}")
-        return df, f"Error scaling features: {e}"
 
 def rebalance_dataset(
     df: pd.DataFrame,
@@ -371,132 +545,112 @@ def rebalance_dataset(
     preview: bool = False
 ) -> Tuple[pd.DataFrame, str]:
     """
-    Rebalance a dataset for classification using oversampling or undersampling.
+    Rebalance classification dataset using custom oversampling or undersampling without imblearn.
     """
     try:
         if target not in df.columns:
             return df, f"Target column {target} not found."
         df_out = df if preview else df.copy()
         value_counts = df_out[target].value_counts()
+        if len(value_counts) < 2:
+            return df, "Target column must have at least two classes."
+        
+        np.random.seed(42)
+        majority_class = value_counts.idxmax()
         majority_count = value_counts.max()
+        minority_class = value_counts.idxmin()
         minority_count = value_counts.min()
+        
         if method == "oversample":
             target_count = int(majority_count * ratio)
-            for cls in value_counts.index:
-                cls_count = value_counts[cls]
-                if cls_count < target_count:
-                    samples = df_out[df_out[target] == cls].sample(n=target_count - cls_count, replace=True, random_state=42)
-                    df_out = pd.concat([df_out, samples])
-            msg = f"Oversampled {target} to achieve ratio {ratio}."
+            if target_count < minority_count:
+                return df, f"Target count {target_count} is less than minority count {minority_count}."
+            minority_df = df_out[df_out[target] == minority_class]
+            oversampled_minority = minority_df.sample(n=target_count, replace=True, random_state=42)
+            majority_df = df_out[df_out[target] == majority_class]
+            df_out = pd.concat([majority_df, oversampled_minority], ignore_index=True)
+            msg = f"Oversampled dataset to balance {target} with ratio {ratio} (minority class: {minority_class}, {target_count} samples)."
         elif method == "undersample":
             target_count = int(minority_count * ratio)
-            df_out = pd.concat([
-                df_out[df_out[target] == cls].sample(n=min(target_count, value_counts[cls]), random_state=42)
-                for cls in value_counts.index
-            ])
-            msg = f"Undersampled {target} to achieve ratio {ratio}."
+            if target_count > majority_count:
+                return df, f"Target count {target_count} is greater than majority count {majority_count}."
+            majority_df = df_out[df_out[target] == majority_class]
+            undersampled_majority = majority_df.sample(n=target_count, replace=False, random_state=42)
+            minority_df = df_out[df_out[target] == minority_class]
+            df_out = pd.concat([undersampled_majority, minority_df], ignore_index=True)
+            msg = f"Undersampled dataset to balance {target} with ratio {ratio} (majority class: {majority_class}, {target_count} samples)."
         else:
-            return df, f"Unsupported rebalancing method: {method}."
+            return df, f"Unsupported rebalancing method: {method}"
+        
         logger.info(msg)
         return df_out, msg
     except Exception as e:
         logger.error(f"Error in rebalance_dataset: {e}")
         return df, f"Error rebalancing dataset: {e}"
 
-def type_convert(
-    df: pd.DataFrame,
-    column: str,
-    type: str,
-    preview: bool = False
-) -> Tuple[pd.DataFrame, str]:
-    """
-    Convert a column to a specified data type.
-    """
-    try:
-        if column not in df.columns:
-            return df, f"Column {column} not found."
-        df_out = df if preview else df.copy()
-        if type == "int":
-            df_out[column] = pd.to_numeric(df_out[column], errors='coerce').astype('Int64')
-        elif type == "float":
-            df_out[column] = pd.to_numeric(df_out[column], errors='coerce').astype(float)
-        elif type == "str":
-            df_out[column] = df_out[column].astype(str)
-        elif type == "datetime":
-            df_out[column] = pd.to_datetime(df_out[column], errors='coerce')
-        else:
-            return df, f"Unsupported type: {type}."
-        msg = f"Converted {column} to {type}."
-        logger.info(msg)
-        return df_out, msg
-    except Exception as e:
-        logger.error(f"Error in type_convert: {e}")
-        return df, f"Error converting type: {e}"
-
 def skewness_transform(
     df: pd.DataFrame,
-    column: str,
-    transform: str = "log",
+    columns: List[str],
+    method: str = "log",
     preview: bool = False
 ) -> Tuple[pd.DataFrame, str]:
     """
-    Apply a transformation to reduce skewness in a numeric column.
+    Apply transformation to reduce skewness in numeric columns.
     """
     try:
-        if column not in df.columns:
-            return df, f"Column {column} not found."
-        if not pd.api.types.is_numeric_dtype(df[column]):
-            return df, f"Column {column} is not numeric."
+        if not columns:
+            return df, "No columns selected for skewness transformation."
+        valid_cols = [c for c in columns if c in df.columns and pd.api.types.is_numeric_dtype(df[c])]
+        if not valid_cols:
+            return df, "No valid numeric columns selected for skewness transformation."
         df_out = df if preview else df.copy()
-        if transform == "log":
-            if df_out[column].min() <= 0:
-                return df, f"Cannot apply log transform to {column} due to non-positive values."
-            df_out[column] = np.log1p(df_out[column])
-            msg = f"Applied log transform to {column}."
-        elif transform == "sqrt":
-            if df_out[column].min() < 0:
-                return df, f"Cannot apply sqrt transform to {column} due to negative values."
-            df_out[column] = np.sqrt(df_out[column])
-            msg = f"Applied sqrt transform to {column}."
-        else:
-            return df, f"Unsupported transform: {transform}."
+        processed_cols = []
+        for col in valid_cols:
+            if method == "log":
+                df_out[col] = np.log1p(df_out[col].clip(lower=0))
+            elif method == "sqrt":
+                df_out[col] = np.sqrt(df_out[col].clip(lower=0))
+            else:
+                return df, f"Unsupported skewness transformation method: {method}"
+            processed_cols.append(col)
+        msg = f"Applied {method} transformation to {len(processed_cols)} columns."
         logger.info(msg)
         return df_out, msg
     except Exception as e:
         logger.error(f"Error in skewness_transform: {e}")
-        return df, f"Error in skewness transform: {e}"
+        return df, f"Error applying skewness transformation: {e}"
 
 def mask_pii(
     df: pd.DataFrame,
-    column: str,
-    pii_types: Optional[List[str]] = None,
-    preview: bool = False,
+    columns: List[str],
+    patterns: Optional[Dict[str, str]] = None,
+    preview: bool = False
 ) -> Tuple[pd.DataFrame, str]:
     """
-    Mask personally identifiable information in a column using regex patterns.
-    Returns (transformed_df, message).
+    Mask personally identifiable information (PII) in specified columns.
     """
-    start_time = time.time()
     try:
-        if column not in df.columns:
-            return df, f"Column {column} not found."
+        if not columns:
+            return df, "No columns selected for PII masking."
+        valid_cols = [c for c in columns if c in df.columns]
+        if not valid_cols:
+            return df, "No valid columns selected for PII masking."
         df_out = df if preview else df.copy()
-        pii_patterns = {
+        default_patterns = {
             'email': r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b',
-            'phone': r'\b(\+\d{1,3}[-.\s]?\d{1,4}[-.\s]?\d{1,4}[-.\s]?\d{1,4}|\d{3}[-.\s]\d{3}[-.\s]\d{4})\b',
-            'credit_card': r'\b(?:\d[ -]*?){13,16}\b'
+            'phone': r'\b\d{3}-\d{3}-\d{4}\b|\b\d{10}\b',
+            'credit_card': r'\b\d{4}-\d{4}-\d{4}-\d{4}\b'
         }
-        applied = []
-        df_out[column] = df_out[column].astype(str)
-        for pii_type in pii_types or pii_patterns.keys():
-            if pii_type in pii_patterns:
-                pattern = pii_patterns[pii_type]
-                df_out[column] = df_out[column].str.replace(pattern, f"[MASKED_{pii_type.upper()}]", regex=True)
-                applied.append(pii_type)
-        if not applied:
-            return df, f"No valid PII types specified for {column}."
-        msg = f"Masked PII ({', '.join(applied)}) in {column} using regex."
-        logger.info(f"mask_pii took {time.time() - start_time:.2f} seconds")
+        patterns = patterns or default_patterns
+        processed_cols = []
+        for col in valid_cols:
+            series = df_out[col].astype(str)
+            for name, pattern in patterns.items():
+                series = series.str.replace(pattern, f'[MASKED_{name.upper()}]', regex=True)
+            df_out[col] = series
+            processed_cols.append(col)
+        msg = f"Masked PII in {len(processed_cols)} columns."
+        logger.info(msg)
         return df_out, msg
     except Exception as e:
         logger.error(f"Error in mask_pii: {e}")
@@ -505,91 +659,75 @@ def mask_pii(
 def smooth_time_series(
     df: pd.DataFrame,
     column: str,
-    window: int = 5,
     method: str = "moving_average",
-    interpolate: str = "linear",
+    window: int = 5,
+    interpolate: str = "none",
     preview: bool = False
 ) -> Tuple[pd.DataFrame, str]:
     """
-    Smooth a time-series column using a specified method with optional interpolation.
-    Args:
-        df: Input DataFrame.
-        column: Time-series column (numeric).
-        window: Window size for smoothing.
-        method: Smoothing method ("moving_average" or "savitzky_golay").
-        interpolate: Interpolation method for missing values ("linear", "ffill", "bfill", None).
-        preview: If True, return unchanged df for preview.
-    Returns:
-        (transformed_df, message).
+    Smooth time-series data in a numeric column.
     """
     try:
         if column not in df.columns:
             return df, f"Column {column} not found."
-        # Validate numeric column
-        try:
-            df[column] = pd.to_numeric(df[column], errors='coerce')
-        except Exception as e:
-            return df, f"Column {column} contains non-numeric values: {e}"
-        if df[column].isna().all():
-            return df, f"Column {column} contains only missing values."
+        if not pd.api.types.is_numeric_dtype(df[column]):
+            return df, f"Column {column} is not numeric."
         df_out = df if preview else df.copy()
-        if interpolate and df_out[column].isna().any():
-            df_out[column] = df_out[column].interpolate(method=interpolate, limit_direction='both')
+        if interpolate != "none":
+            if interpolate in ["linear", "ffill", "bfill"]:
+                df_out[column] = df_out[column].interpolate(method=interpolate)
+            else:
+                return df, f"Unsupported interpolation method: {interpolate}"
         if method == "moving_average":
             df_out[column] = df_out[column].rolling(window=window, min_periods=1).mean()
-            msg = f"Applied moving average smoothing to {column} with window {window} and interpolation {interpolate}."
         elif method == "savitzky_golay":
             if window % 2 == 0:
-                return df, f"Savitzky-Golay requires an odd window size, got {window}."
-            if df_out[column].isna().any():
-                return df, f"Savitzky-Golay cannot handle missing values in {column}."
-            df_out[column] = savgol_filter(df_out[column], window_length=window, polyorder=2)
-            msg = f"Applied Savitzky-Golay smoothing to {column} with window {window}."
+                window += 1
+            df_out[column] = savgol_filter(df_out[column].fillna(method='ffill'), window_length=window, polyorder=2)
         else:
-            return df, f"Unsupported smoothing method: {method}."
+            return df, f"Unsupported smoothing method: {method}"
+        msg = f"Smoothed {column} using {method} with window {window}."
         logger.info(msg)
         return df_out, msg
     except Exception as e:
         logger.error(f"Error in smooth_time_series: {e}")
-        return df, f"Error smoothing time series: {e}"
+        return df, f"Error smoothing time-series: {e}"
 
 def resample_time_series(
     df: pd.DataFrame,
     time_column: str,
-    freq: str = "1H",
+    freq: str,
     agg_func: str = "mean",
     preview: bool = False
 ) -> Tuple[pd.DataFrame, str]:
     """
-    Resample a time-series DataFrame to a specified frequency.
-    Args:
-        df: Input DataFrame with a datetime index or column.
-        time_column: Datetime column to set as index.
-        freq: Resampling frequency (e.g., '1H', '1D').
-        agg_func: Aggregation function ("mean", "sum", "last").
-        preview: If True, return unchanged df for preview.
-    Returns:
-        (transformed_df, message).
+    Resample time-series data to a specified frequency.
     """
     try:
         if time_column not in df.columns:
             return df, f"Time column {time_column} not found."
         df_out = df if preview else df.copy()
-        # Convert to datetime if not already
-        df_out[time_column] = pd.to_datetime(df_out[time_column], errors='coerce')
-        if df_out[time_column].isna().all():
-            return df, f"Column {time_column} contains no valid datetime values."
+        if not pd.api.types.is_datetime64_any_dtype(df_out[time_column]):
+            df_out[time_column] = pd.to_datetime(df_out[time_column], errors='coerce')
         df_out = df_out.set_index(time_column)
-        try:
-            df_out = df_out.resample(freq).agg(agg_func).reset_index()
-        except ValueError as e:
-            return df, f"Invalid frequency {freq}: {e}"
-        msg = f"Resampled time series on {time_column} to {freq} using {agg_func}."
+        df_out = df_out.resample(freq)
+        if agg_func == "mean":
+            df_out = df_out.mean()
+        elif agg_func == "sum":
+            df_out = df_out.sum()
+        elif agg_func == "first":
+            df_out = df_out.first()
+        elif agg_func == "last":
+            df_out = df_out.last()
+        else:
+            return df, f"Unsupported aggregation function: {agg_func}"
+        df_out = df_out.reset_index()
+        msg = f"Resampled time-series on {time_column} to frequency {freq} using {agg_func}."
         logger.info(msg)
         return df_out, msg
     except Exception as e:
         logger.error(f"Error in resample_time_series: {e}")
-        return df, f"Error resampling time series: {e}"
+        return df, f"Error resampling time-series: {e}"
 
 def clean_text(
     df: pd.DataFrame,
@@ -599,41 +737,28 @@ def clean_text(
     preview: bool = False
 ) -> Tuple[pd.DataFrame, str]:
     """
-    Clean text data by removing stopwords and optionally lemmatizing.
+    Clean text in a column by removing stopwords and/or lemmatizing.
     """
     try:
         if column not in df.columns:
             return df, f"Column {column} not found."
         df_out = df if preview else df.copy()
-        # Check for empty or whitespace-only text
-        if df_out[column].astype(str).str.strip().eq('').all():
-            return df, f"Column {column} contains only empty or whitespace text."
-        df_out[column] = df_out[column].astype(str).str.lower().str.replace(r'[^\w\s]', '', regex=True).str.strip()
-        if remove_stopwords:
-            stop_words = set(stopwords.words('english'))
-            df_out[column] = df_out[column].apply(
-                lambda x: ' '.join(word for word in word_tokenize(x) if word not in stop_words)
-            )
-        if lemmatize:
-            lemmatizer = WordNetLemmatizer()
-            df_out[column] = df_out[column].apply(
-                lambda x: ' '.join(lemmatizer.lemmatize(word) for word in word_tokenize(x))
-            )
-        msg = f"Cleaned text in {column} {'with stopword removal' if remove_stopwords else ''}{' and lemmatization' if lemmatize else ''}."
+        stop_words = set(stopwords.words('english')) if remove_stopwords else set()
+        lemmatizer = WordNetLemmatizer() if lemmatize else None
+        def process_text(text):
+            if pd.isna(text):
+                return text
+            text = str(text).lower()
+            tokens = word_tokenize(text)
+            if remove_stopwords:
+                tokens = [t for t in tokens if t not in stop_words]
+            if lemmatize:
+                tokens = [lemmatizer.lemmatize(t) for t in tokens]
+            return ' '.join(tokens)
+        df_out[column] = df_out[column].apply(process_text)
+        msg = f"Cleaned text in {column}: remove_stopwords={remove_stopwords}, lemmatize={lemmatize}."
         logger.info(msg)
         return df_out, msg
-    except LookupError as e:
-        logger.error(f"NLTK resource error in clean_text: {e}")
-        st.error(
-            f"NLTK resource error: {e}\n"
-            "Please run the following in Python:\n"
-            "import nltk\n"
-            "nltk.download('punkt')\n"
-            "nltk.download('punkt_tab')\n"
-            "nltk.download('stopwords')\n"
-            "nltk.download('wordnet')"
-        )
-        return df, f"Error cleaning text: {e}"
     except Exception as e:
         logger.error(f"Error in clean_text: {e}")
         return df, f"Error cleaning text: {e}"
@@ -650,49 +775,32 @@ def extract_tfidf(
     try:
         if column not in df.columns:
             return df, f"Column {column} not found."
-        # Check for empty or whitespace-only text
-        if df[column].astype(str).str.strip().eq('').all():
-            return df, f"Column {column} contains only empty or whitespace text."
         df_out = df if preview else df.copy()
-        vectorizer = TfidfVectorizer(max_features=max_features)
-        tfidf_matrix = vectorizer.fit_transform(df_out[column].astype(str))
-        feature_names = vectorizer.get_feature_names_out()
-        # Adjust max_features to actual number of features to avoid shape mismatch
-        actual_features = min(max_features, len(feature_names))
-        tfidf_df = pd.DataFrame(
-            tfidf_matrix.toarray()[:, :actual_features],
-            columns=[f"{column}_tfidf_{i}" for i in range(actual_features)],
-            index=df_out.index
-        )
-        df_out = pd.concat([df_out, tfidf_df], axis=1).drop(columns=[column])
-        msg = f"Extracted {actual_features} TF-IDF features from {column}."
+        tfidf = TfidfVectorizer(max_features=max_features, stop_words='english')
+        tfidf_matrix = tfidf.fit_transform(df_out[column].astype(str).fillna(''))
+        feature_names = [f"tfidf_{col}" for col in tfidf.get_feature_names_out()]
+        tfidf_df = pd.DataFrame(tfidf_matrix.toarray(), columns=feature_names, index=df_out.index)
+        df_out = df_out.drop(columns=[column]).join(tfidf_df)
+        msg = f"Extracted {len(feature_names)} TF-IDF features from {column}."
         logger.info(msg)
         return df_out, msg
     except Exception as e:
         logger.error(f"Error in extract_tfidf: {e}")
-        return df, f"Error extracting TF-IDF: {e}"
+        return df, f"Error extracting TF-IDF features: {e}"
 
 def resize_image(
     df: pd.DataFrame,
     column: str,
-    width: int = 224,
-    height: int = 224,
+    width: int,
+    height: int,
     preview: bool = False
 ) -> Tuple[pd.DataFrame, str]:
     """
-    Resize images referenced in a DataFrame column.
-    Args:
-        df: DataFrame with image file paths or base64 strings.
-        column: Column containing image paths/URLs.
-        width, height: Target dimensions.
-        preview: If True, return unchanged df for preview.
-    Returns:
-        (transformed_df, message).
+    Resize images in a column to specified dimensions.
     """
     try:
         if column not in df.columns:
             return df, f"Column {column} not found."
-        # Validate image data
         valid_images = df[column].astype(str).str.contains(r'\.(png|jpg|jpeg)$|data:image', regex=True, na=False)
         if not valid_images.any():
             return df, f"No valid image paths or base64 strings in {column}."
@@ -734,7 +842,6 @@ def normalize_image(
     try:
         if column not in df.columns:
             return df, f"Column {column} not found."
-        # Validate image data
         valid_images = df[column].astype(str).str.contains(r'\.(png|jpg|jpeg)$|data:image', regex=True, na=False)
         if not valid_images.any():
             return df, f"No valid image paths or base64 strings in {column}."
