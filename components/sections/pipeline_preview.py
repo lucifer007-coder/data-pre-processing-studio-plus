@@ -1,7 +1,7 @@
 import logging
 import streamlit as st
 from utils.data_utils import dtype_split, _arrowize, sample_for_preview
-from utils.viz_utils import alt_histogram
+from utils.viz_utils import alt_histogram, alt_line_plot
 from utils.stats_utils import compute_basic_stats
 from preprocessing.pipeline import run_pipeline
 from session import push_history
@@ -29,7 +29,8 @@ def section_pipeline_preview():
             for i, step in enumerate(pipeline, start=1):
                 st.write(f"{i}. **{step['kind'].replace('_', ' ').title()}** — {step.get('params', {})}")
 
-        col1, col2, col3, col4 = st.columns([1, 1, 1, 1])
+        # Use three columns for Preview, Clear, and Apply buttons
+        col1, col2, col3 = st.columns([1, 1, 1])
         with col1:
             if st.button("🔍 Preview Full Pipeline", help="Preview the pipeline on a sampled dataset"):
                 if not pipeline:
@@ -37,8 +38,15 @@ def section_pipeline_preview():
                     return
                 with st.spinner("Generating pipeline preview..."):
                     prev = sample_for_preview(df)
-                    preview_df, msgs = run_pipeline(prev, pipeline, preview=True)
-                    st.session_state.last_preview = (preview_df, "\n".join(msgs))
+                    result = run_pipeline(prev, pipeline, preview=True)
+                    # Handle variable return values from run_pipeline
+                    if isinstance(result, tuple) and len(result) >= 2:
+                        preview_df, msgs = result[:2]
+                        st.session_state.last_preview = (preview_df, "\n".join(msgs))
+                    else:
+                        logger.error(f"Unexpected return format from run_pipeline: {result}")
+                        st.error("Error: Invalid pipeline preview result.")
+                        return
                 st.success("Pipeline preview complete.")
                 # Display before/after stats
                 before_stats = compute_basic_stats(df)
@@ -57,53 +65,53 @@ def section_pipeline_preview():
         with col2:
             if st.button("🚮 Clear Pipeline", help="Clear all pipeline steps"):
                 st.session_state.pipeline = []
-                st.session_state.last_preview = None
-                st.info("Cleared pipeline.")
+                st.success("Pipeline cleared.")
                 st.rerun()
 
         with col3:
-            if st.button("✅ Apply Pipeline to Data", help="Apply the pipeline to the full dataset"):
+            if st.button("✅ Apply Pipeline", help="Apply pipeline to the full dataset"):
                 if not pipeline:
                     st.warning("Pipeline is empty.")
                     return
                 with st.spinner("Applying pipeline..."):
-                    push_history("Before pipeline")
-                    msgs = []
-                    tmp_df = st.session_state.df.copy()
-                    steps = st.session_state.pipeline.copy()
-                    total = len(steps)
                     progress_placeholder = st.empty()
-                    for i, step in enumerate(steps, start=1):
-                        with progress_placeholder.container():
-                            st.progress(
-                                min(i / total, 1.0),
-                                text=f"Applying step {i}/{total}: {step['kind'].replace('_', ' ').title()}"
-                            )
-                        tmp_df, msg = run_pipeline(tmp_df, [step])
-                        msgs.append(msg[0])
-                    with progress_placeholder.container():
-                        st.progress(1.0, text="Pipeline application complete")
+                    tmp_df = df.copy()
+                    for i, step in enumerate(pipeline, 1):
+                        progress_placeholder.progress(
+                            i / len(pipeline),
+                            text=f"Applying step {i}/{len(pipeline)}: {step['kind']}"
+                        )
+                        result = run_pipeline(tmp_df, [step])
+                        # Handle variable return values from run_pipeline
+                        if isinstance(result, tuple) and len(result) >= 2:
+                            tmp_df, msg = result[:2]
+                            st.session_state.changelog.extend([f"✅ {m}" for m in msg])
+                        else:
+                            logger.error(f"Unexpected return format from run_pipeline: {result}")
+                            st.error(f"Error: Invalid pipeline application result for step {step['kind']}.")
+                            return
+                    progress_placeholder.progress(1.0, text="Pipeline application complete")
                     progress_placeholder.empty()
                     st.session_state.df = tmp_df
-                    st.session_state.changelog.extend([f"✅ {m}" for m in msgs])
                 st.success("Applied pipeline to full dataset.")
                 st.session_state.pipeline = []
 
-        with col4:
-            st.subheader("Export Session Bundle")
-            st.warning("Note: The .dps bundle contains plain-text data, including any PII from the original dataset. Store it securely.")
-            sample_mode = st.checkbox("Sample mode (first 5000 rows)", help="Reduces bundle size for large datasets.")
-            try:
-                if st.download_button(
-                    "💾 Export .dps bundle",
-                    data=export_bundle(sample_mode),
-                    file_name="session.dps",
-                    mime="application/json",
-                    help="Download a bundle to save your session state."
-                ):
-                    st.success("Bundle exported as session.dps.")
-            except ValueError as e:
-                st.error(str(e))
+        # Export Session Bundle on a new line
+        st.markdown("---")
+        st.subheader("Export Session Bundle")
+        st.warning("Note: The .dps bundle contains plain-text data, including any PII from the original dataset. Store it securely.")
+        sample_mode = st.checkbox("Sample mode (first 5000 rows)", help="Reduces bundle size for large datasets.")
+        try:
+            if st.download_button(
+                "💾 Export .dps bundle",
+                data=export_bundle(sample_mode),
+                file_name="session.dps",
+                mime="application/json",
+                help="Download a bundle to save your session state."
+            ):
+                st.success("Bundle exported as session.dps.")
+        except ValueError as e:
+            st.error(str(e))
 
         st.markdown("---")
         if st.session_state.last_preview is not None:
@@ -114,25 +122,37 @@ def section_pipeline_preview():
             st.dataframe(_arrowize(prev_df.head(10)))
 
             num_cols, _ = dtype_split(prev_df)
-            if num_cols:
+            datetime_cols = prev_df.select_dtypes(include=["datetime64"]).columns.tolist()
+            if num_cols or datetime_cols:
                 st.subheader("Visualize Preview")
-                column = st.selectbox(
-                    "Preview histogram for column",
-                    num_cols,
-                    help="Select a numeric column to compare distributions."
-                )
-                left, right = st.columns(2)
-                with left:
-                    st.write("**Current Data**")
-                    chart1 = alt_histogram(sample_for_preview(df), column, "Current Data")
-                    if chart1:
-                        st.altair_chart(chart1, use_container_width=True)
-                with right:
-                    st.write("**Preview Data**")
-                    chart2 = alt_histogram(prev_df, column, "Preview Data")
-                    if chart2:
-                        st.altair_chart(chart2, use_container_width=True)
-
+                vis_type = st.radio("Visualization type", ["Histogram", "Time-Series"], horizontal=True)
+                if vis_type == "Histogram":
+                    column = st.selectbox("Preview histogram for column", num_cols, help="Select a numeric column.")
+                    left, right = st.columns(2)
+                    with left:
+                        st.write("**Current Data**")
+                        chart1 = alt_histogram(sample_for_preview(df), column, "Current Data")
+                        if chart1:
+                            st.altair_chart(chart1, use_container_width=True)
+                    with right:
+                        st.write("**Preview Data**")
+                        chart2 = alt_histogram(prev_df, column, "Preview Data")
+                        if chart2:
+                            st.altair_chart(chart2, use_container_width=True)
+                elif vis_type == "Time-Series" and datetime_cols:
+                    time_col = st.selectbox("Time column", datetime_cols, help="Select a datetime column.")
+                    value_col = st.selectbox("Value column", num_cols, help="Select a numeric column.")
+                    left, right = st.columns(2)
+                    with left:
+                        st.write("**Current Data**")
+                        chart1 = alt_line_plot(sample_for_preview(df), time_col, value_col, "Current Data")
+                        if chart1:
+                            st.altair_chart(chart1, use_container_width=True)
+                    with right:
+                        st.write("**Preview Data**")
+                        chart2 = alt_line_plot(prev_df, time_col, value_col, "Preview Data")
+                        if chart2:
+                            st.altair_chart(chart2, use_container_width=True)
     except Exception as e:
         logger.error(f"Error in section_pipeline_preview: {e}")
         st.error(f"Error in pipeline preview section: {e}")
