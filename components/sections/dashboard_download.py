@@ -3,15 +3,12 @@ import pandas as pd
 import altair as alt
 import io
 import numpy as np
+import openpyxl
 from scipy import stats
 from utils.stats_utils import compute_basic_stats
 from utils.viz_utils import alt_histogram
 from utils.recommendations import PreprocessingRecommendations
 
-
-# ------------------------------------------------------------------
-# Helper: local lightweight compare_stats (avoids circular imports)
-# ------------------------------------------------------------------
 def compare_stats(before, after) -> dict:
     """Lightweight version of utils.stats_utils.compare_stats for local use."""
     if not isinstance(before, dict):
