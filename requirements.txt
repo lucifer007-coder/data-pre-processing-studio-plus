@@ -11,3 +11,5 @@ pillow>=10.0.0
 openpyxl>=3.1.0
 pyarrow>=14.0.0
 regex>=2023.10.3
+dask>=2024.8.2
+dask[distributed]>=2024.8.2
