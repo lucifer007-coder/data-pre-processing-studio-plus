@@ -1,6 +1,8 @@
 import logging
 import numpy as np
 import streamlit as st
+import pandas as pd
+import dask.dataframe as dd
 import json
 from utils.data_utils import dtype_split, _arrowize, sample_for_preview
 from preprocessing.steps import encode_categorical
@@ -70,29 +72,22 @@ def section_encoding():
             try:
                 if mapping_input:
                     ordinal_mappings = json.loads(mapping_input)
-                    if not isinstance(ordinal_mappings, dict):
-                        st.error("Ordinal mappings must be a JSON dictionary.")
-                        return
             except json.JSONDecodeError:
                 st.error("Invalid JSON format for ordinal mappings.")
                 return
         if high_cardinality == "Target encode":
-            num_cols = df.select_dtypes(include=[np.number]).columns.tolist()
             target_column = st.selectbox(
                 "Target column",
-                ["(none)"] + num_cols,
+                ["(none)"] + (df.columns.compute().tolist() if isinstance(df, dd.DataFrame) else df.columns.tolist()),
                 key="target_column",
-                help="Select a numeric or binary column for target encoding."
+                help="Select a target column for target encoding."
             )
-            if target_column == "(none)":
-                st.warning("Please select a target column for target encoding.")
-                return
         if high_cardinality == "Hashing encode":
             n_components = st.number_input(
                 "Number of components",
                 min_value=1, value=8, step=1,
                 key="n_components",
-                help="Number of buckets for hashing encoding."
+                help="Number of features for hashing encoding."
             )
 
         c1, c2, c3 = st.columns([1, 1, 1])
