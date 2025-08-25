@@ -17,7 +17,6 @@ def sidebar_navigation() -> str:
             "Imbalanced Data",
             "Time-Series Preprocessing",
             "Text Preprocessing",
-            "Image Preprocessing",
             "Pipeline & Preview",
             "Dashboard & Download",
         ],
