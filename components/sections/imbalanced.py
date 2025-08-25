@@ -1,6 +1,7 @@
 import logging
 import streamlit as st
 import pandas as pd
+import dask.dataframe as dd
 from utils.data_utils import _arrowize, sample_for_preview, dtype_split
 from preprocessing.steps import rebalance_dataset
 from utils.stats_utils import compute_basic_stats
@@ -55,12 +56,12 @@ def section_imbalanced():
                     col1, col2 = st.columns(2)
                     with col1:
                         st.write("Before Rebalancing")
-                        counts_before = df[target].value_counts(dropna=False)
-                        st.dataframe(pd.DataFrame({"Count": counts_before}))
+                        counts_before = df[target].value_counts(dropna=False).compute() if isinstance(df, dd.DataFrame) else df[target].value_counts(dropna=False)
+                        st.dataframe(_arrowize(pd.DataFrame({"Count": counts_before})))
                     with col2:
                         st.write("After Rebalancing (Preview)")
                         counts_after = preview_df[target].value_counts(dropna=False)
-                        st.dataframe(pd.DataFrame({"Count": counts_after}))
+                        st.dataframe(_arrowize(pd.DataFrame({"Count": counts_after})))
 
         with c2:
             if st.button("📦 Add to Pipeline", help="Add rebalancing step to the pipeline"):
