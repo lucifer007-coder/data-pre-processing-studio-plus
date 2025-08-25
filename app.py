@@ -15,7 +15,6 @@ from components.sections.pipeline_preview import section_pipeline_preview
 from components.sections.dashboard_download import section_dashboard_download
 from components.sections.time_series import section_time_series
 from components.sections.text import section_text
-from components.sections.image import section_image
 from session import init_session
 
 # Fix module imports
@@ -61,8 +60,6 @@ def main():
             section_time_series()
         elif section == "Text Preprocessing":
             section_text()
-        elif section == "Image Preprocessing":
-            section_image()
 
         st.markdown("---")
         st.caption(
