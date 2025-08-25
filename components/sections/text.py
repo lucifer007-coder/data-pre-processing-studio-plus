@@ -1,4 +1,6 @@
 import streamlit as st
+import pandas as pd
+import dask.dataframe as dd
 from utils.data_utils import dtype_split, _arrowize, sample_for_preview
 from preprocessing.steps import clean_text, extract_tfidf
 from utils.viz_utils import word_cloud
@@ -20,7 +22,7 @@ def section_text():
             return
 
         # Warning for large datasets
-        if len(df) > 100_000:
+        if (isinstance(df, dd.DataFrame) and df.shape[0].compute() > 100_000) or (isinstance(df, pd.DataFrame) and len(df) > 100_000):
             st.warning(
                 "Large dataset detected (>100,000 rows). Previews will be sampled, and full processing may be slow. Consider sampling the dataset."
             )
@@ -48,7 +50,6 @@ def section_text():
                         return
                     with st.spinner("Generating text cleaning preview..."):
                         prev = sample_for_preview(df)
-                        # Validate text content
                         if prev[text_col].astype(str).str.strip().eq('').all():
                             st.error(f"Column {text_col} contains only empty or whitespace text.")
                             return
@@ -56,9 +57,8 @@ def section_text():
                         st.session_state.last_preview = (preview_df, msg)
                         st.info(msg)
                         st.dataframe(_arrowize(preview_df.head(10)))
-                        word_cloud(preview_df, text_col, "Word Cloud of Cleaned Text")
             with c2:
-                if st.button("📦 Add Cleaning to Pipeline", help="Add text cleaning step to pipeline"):
+                if st.button("📦 Add to Pipeline", help="Add text cleaning step to pipeline"):
                     if not text_col:
                         st.warning("Please select a text column.")
                         return
@@ -70,11 +70,17 @@ def section_text():
                     st.success("Added text cleaning step to pipeline.")
 
         with st.expander("TF-IDF Feature Extraction", expanded=True):
-            st.markdown("**Extract numerical features from text using TF-IDF.**")
+            st.markdown("**Extract TF-IDF features for machine learning.**")
+            text_col = st.selectbox(
+                "Text column",
+                cat_cols,
+                key="tfidf_col",
+                help="Select a text column for TF-IDF feature extraction."
+            )
             max_features = st.number_input(
-                "Max TF-IDF features",
-                10, 200, 100, 10,
-                help="Maximum number of features to extract. Limited by vocabulary size."
+                "Max features",
+                min_value=10, max_value=1000, value=100, step=10,
+                help="Maximum number of TF-IDF features to extract."
             )
             c1, c2 = st.columns([1, 1])
             with c1:
@@ -84,7 +90,6 @@ def section_text():
                         return
                     with st.spinner("Generating TF-IDF preview..."):
                         prev = sample_for_preview(df)
-                        # Validate text content
                         if prev[text_col].astype(str).str.strip().eq('').all():
                             st.error(f"Column {text_col} contains only empty or whitespace text.")
                             return
