@@ -1,27 +1,25 @@
 import logging
 import pandas as pd
 import numpy as np
+import dask.dataframe as dd
 from typing import Dict, Any, Optional
 import streamlit as st
 from utils.data_utils import dtype_split
 
 logger = logging.getLogger(__name__)
 
-# ------------------------------------------------------------------
-# 1.  Aggressive caching (hash by DataFrame id + shape + dtypes)
-# ------------------------------------------------------------------
 @st.cache_data(
     show_spinner="Computing stats …",
-    ttl=600,                     # 10-minute cache lifetime
-    max_entries=3                # keep at most 3 DataFrame fingerprints
+    ttl=600,
+    max_entries=3
 )
-def compute_basic_stats(df: Optional[pd.DataFrame]) -> Dict[str, Any]:
+def compute_basic_stats(df: Optional[pd.DataFrame | dd.DataFrame]) -> Dict[str, Any]:
     """
     Return comprehensive statistics for a DataFrame.
     Cached per DataFrame identity + shape + dtypes to avoid recomputation.
     """
-    if df is None:
-        logger.warning("DataFrame is None, returning empty statistics")
+    if df is None or (isinstance(df, pd.DataFrame) and df.empty) or (isinstance(df, dd.DataFrame) and df.compute().empty):
+        logger.warning("DataFrame is None or empty, returning empty statistics")
         return {
             "shape": (0, 0),
             "columns": [],
@@ -35,82 +33,67 @@ def compute_basic_stats(df: Optional[pd.DataFrame]) -> Dict[str, Any]:
             "duplicate_rows": 0
         }
 
-    if not isinstance(df, pd.DataFrame):
-        logger.error(f"Expected pandas DataFrame or None, got {type(df)}")
+    if not isinstance(df, (pd.DataFrame, dd.DataFrame)):
+        logger.error(f"Expected pandas or dask DataFrame or None, got {type(df)}")
         st.error(f"Invalid data type: expected DataFrame, got {type(df)}")
         return {}
 
     try:
-        num_cols, cat_cols = dtype_split(df)
-
-        # --- Missing counts --------------------------------------------------
-        missing_series = df.isna().sum()
-        missing_total = int(missing_series.sum())
-        missing_by_col = {
-            k: int(v) for k, v in missing_series.sort_values(ascending=False).items()
-        }
-
-        # --- Numeric describe (sample if > 1 M rows) -------------------------
-        describe_numeric = {}
-        if num_cols:
-            numeric_df = df[num_cols]
-            if len(numeric_df) > 1_000_000:
-                numeric_df = numeric_df.sample(n=min(100_000, len(numeric_df)), random_state=42)
-            desc = numeric_df.describe()
-            describe_numeric = desc.to_dict()
-            # Convert numpy scalars → Python floats
-            for col, stats in describe_numeric.items():
-                for stat_name, val in stats.items():
-                    if pd.isna(val):
-                        describe_numeric[col][stat_name] = None
-                    else:
-                        describe_numeric[col][stat_name] = float(val)
-
-        # --- Memory footprint -------------------------------------------------
-        memory_usage_mb = round(float(df.memory_usage(deep=True).sum() / (1024 * 1024)), 2)
-        duplicate_rows = int(df.duplicated().sum())
+        if isinstance(df, dd.DataFrame):
+            shape = df.shape.compute()
+            columns = df.columns.compute().tolist()
+            dtypes = df.dtypes.compute().to_dict()
+            missing_series = df.isna().sum().compute()
+            missing_total = int(missing_series.sum())
+            missing_by_col = {k: int(v) for k, v in missing_series.sort_values(ascending=False).items()}
+            num_cols, cat_cols = dtype_split(df)
+            describe_numeric = {}
+            if num_cols:
+                numeric_df = df[num_cols]
+                if shape[0] > 1_000_000:
+                    numeric_df = numeric_df.sample(frac=100_000/shape[0], random_state=42)
+                desc = numeric_df.describe().compute()
+                describe_numeric = desc.to_dict()
+            memory_usage_mb = df.memory_usage(deep=True).sum().compute() / 1_000_000
+            duplicate_rows = df.duplicated().sum().compute()
+        else:
+            shape = df.shape
+            columns = df.columns.tolist()
+            dtypes = df.dtypes.to_dict()
+            missing_series = df.isna().sum()
+            missing_total = int(missing_series.sum())
+            missing_by_col = {k: int(v) for k, v in missing_series.sort_values(ascending=False).items()}
+            num_cols, cat_cols = dtype_split(df)
+            describe_numeric = {}
+            if num_cols:
+                numeric_df = df[num_cols]
+                if len(numeric_df) > 1_000_000:
+                    numeric_df = numeric_df.sample(n=100_000, random_state=42)
+                desc = numeric_df.describe()
+                describe_numeric = desc.to_dict()
+            memory_usage_mb = df.memory_usage(deep=True).sum() / 1_000_000
+            duplicate_rows = df.duplicated().sum()
 
         return {
-            "shape": df.shape,
-            "columns": list(df.columns),
-            "dtypes": df.dtypes.astype(str).to_dict(),
+            "shape": shape,
+            "columns": columns,
+            "dtypes": dtypes,
             "missing_total": missing_total,
             "missing_by_col": missing_by_col,
             "numeric_cols": num_cols,
             "categorical_cols": cat_cols,
             "describe_numeric": describe_numeric,
-            "memory_usage_mb": memory_usage_mb,
-            "duplicate_rows": duplicate_rows,
+            "memory_usage_mb": float(memory_usage_mb),
+            "duplicate_rows": int(duplicate_rows)
         }
 
     except Exception as e:
-        logger.error(f"Unexpected error in compute_basic_stats: {e}")
-        return {
-            "shape": (0, 0),
-            "columns": [],
-            "dtypes": {},
-            "missing_total": 0,
-            "missing_by_col": {},
-            "numeric_cols": [],
-            "categorical_cols": [],
-            "describe_numeric": {},
-            "memory_usage_mb": 0.0,
-            "duplicate_rows": 0,
-            "error": str(e),
-        }
+        logger.error(f"Error in compute_basic_stats: {e}")
+        st.error(f"Error computing statistics: {e}")
+        return {}
 
-
-# ------------------------------------------------------------------
-# 2.  Cached compare_stats as well
-# ------------------------------------------------------------------
-@st.cache_data(show_spinner="Comparing stats …", ttl=600)
-def compare_stats(before: Optional[Dict[str, Any]],
-                  after: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    """Compare statistics between two DataFrames (before and after processing)."""
-    if before is None:
-        before = {}
-    if after is None:
-        after = {}
+def compare_stats(before: Dict[str, Any], after: Dict[str, Any]) -> Dict[str, Any]:
+    """Compare statistics between two DataFrames."""
     if not isinstance(before, dict):
         before = {}
     if not isinstance(after, dict):
