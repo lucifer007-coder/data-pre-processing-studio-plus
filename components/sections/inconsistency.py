@@ -1,8 +1,9 @@
 import logging
 import streamlit as st
+import pandas as pd
+import dask.dataframe as dd
 from utils.data_utils import dtype_split, _arrowize, sample_for_preview
 from preprocessing.steps import normalize_text, standardize_dates, unit_convert, type_convert, drop_missing, extract_domain
-import pandas as pd
 import threading
 
 logger = logging.getLogger(__name__)
@@ -19,12 +20,13 @@ def section_inconsistency():
 
     try:
         num_cols, cat_cols = dtype_split(df)
+        columns = df.columns.compute().tolist() if isinstance(df, dd.DataFrame) else df.columns.tolist()
 
         # Text Normalization
         st.subheader("Text Normalization")
         text_cols = st.multiselect(
             "Text columns",
-            [c for c in df.columns if c in cat_cols],
+            [c for c in columns if c in cat_cols],
             key="text_cols",
             help="Select columns for text normalization."
         )
@@ -52,7 +54,7 @@ def section_inconsistency():
                 st.info(msg)
                 st.dataframe(_arrowize(preview_df.head(10)))
         with cc2:
-            if st.button("📦 Add to Pipeline", key="add_text_norm", help="Add text normalization step to the pipeline"):
+            if st.button("📦 Add to Pipeline", key="add_text_norm", help="Add text normalization step to pipeline"):
                 if not text_cols:
                     st.warning("Please select at least one column.")
                     return
@@ -60,7 +62,7 @@ def section_inconsistency():
                     "kind": "normalize_text",
                     "params": {
                         "columns": text_cols,
-                        "lowercase": lower,
+                        "lower": lower,
                         "trim": trim,
                         "collapse": collapse,
                         "remove_special": remove_special
@@ -70,321 +72,159 @@ def section_inconsistency():
                     st.session_state.pipeline.append(step)
                 st.success("Added text normalization step to pipeline.")
         with cc3:
-            if st.button("🔄 Reset Text Selection", key="reset_text_norm", help="Clear selected text columns and options"):
+            if st.button("🔄 Reset Text Selection", key="reset_text", help="Clear selected columns"):
                 st.session_state["text_cols"] = []
-                st.session_state["text_lower"] = True
-                st.session_state["text_trim"] = True
-                st.session_state["text_collapse"] = True
-                st.session_state["text_remove_special"] = False
                 st.rerun()
 
         # Date Standardization
         st.subheader("Date Standardization")
-        date_cols = st.multiselect(
+        # Detect date-like columns
+        date_cols = []
+        for col in columns:
+            try:
+                if isinstance(df, dd.DataFrame):
+                    is_datetime = df[col].dtype == 'datetime64[ns]'
+                    has_date_pattern = df[col].astype(str).str.match(r'\d{4}-\d{2}-\d{2}', na=False).any().compute()
+                    is_date_like = is_datetime or has_date_pattern
+                else:
+                    is_datetime = df[col].dtype == 'datetime64[ns]'
+                    has_date_pattern = df[col].astype(str).str.match(r'\d{4}-\d{2}-\d{2}', na=False).any()
+                    is_date_like = is_datetime or has_date_pattern
+                if is_date_like:
+                    date_cols.append(col)
+            except Exception as e:
+                logger.warning(f"Error checking column {col} for date-like data: {e}")
+        
+        date_cols_selected = st.multiselect(
             "Date columns",
-            [c for c in df.columns if c in cat_cols or c in df.select_dtypes(include=["datetime64"]).columns.tolist()],
+            date_cols,
             key="date_cols",
-            help="Select columns to standardize date formats."
+            help="Select columns with date-like data."
         )
         date_format = st.text_input(
             "Date format",
             value="%Y-%m-%d",
             key="date_format",
-            help="Specify the target date format (e.g., %Y-%m-%d)."
+            help="Specify the output format (e.g., %Y-%m-%d for YYYY-MM-DD)."
         )
         dc1, dc2, dc3 = st.columns([1, 1, 1])
         with dc1:
-            if st.button("🔍 Preview Date Standardization", key="preview_date_std", help="Preview the effect on a sampled dataset"):
-                if not date_cols:
+            if st.button("🔍 Preview Date Standardization", key="preview_date", help="Preview the effect on a sampled dataset"):
+                if not date_cols_selected:
                     st.warning("Please select at least one column.")
                     return
                 prev = sample_for_preview(df)
-                preview_df, msg = standardize_dates(prev, date_cols, date_format, preview=True)
+                preview_df, msg = standardize_dates(prev, date_cols_selected, date_format, preview=True)
                 with session_lock:
                     st.session_state.last_preview = (preview_df, msg)
                 st.info(msg)
                 st.dataframe(_arrowize(preview_df.head(10)))
         with dc2:
-            if st.button("📦 Add to Pipeline", key="add_date_std", help="Add date standardization step to the pipeline"):
-                if not date_cols:
+            if st.button("📦 Add to Pipeline", key="add_date", help="Add date standardization step to pipeline"):
+                if not date_cols_selected:
                     st.warning("Please select at least one column.")
                     return
-                step = {"kind": "standardize_dates", "params": {"columns": date_cols, "format": date_format}}
+                step = {
+                    "kind": "standardize_dates",
+                    "params": {"columns": date_cols_selected, "format": date_format}
+                }
                 with session_lock:
                     st.session_state.pipeline.append(step)
                 st.success("Added date standardization step to pipeline.")
         with dc3:
-            if st.button("🔄 Reset Date Selection", key="reset_date_std", help="Clear selected date columns and options"):
+            if st.button("🔄 Reset Date Selection", key="reset_date", help="Clear selected columns"):
                 st.session_state["date_cols"] = []
-                st.session_state["date_format"] = "%Y-%m-%d"
                 st.rerun()
 
         # Unit Conversion
         st.subheader("Unit Conversion")
-        uc_col = st.selectbox(
+        unit_col = st.selectbox(
             "Numeric column",
-            ["(none)"] + num_cols,
-            key="uc_col",
-            help="Select a numeric column to convert units."
+            [c for c in columns if c in num_cols],
+            key="unit_col",
+            help="Select a numeric column for unit conversion."
         )
-        colA, colB, colC = st.columns(3)
-        with colA:
-            factor = st.number_input(
-                "Multiply by factor",
-                value=1.0, step=0.1,
-                key="uc_factor",
-                help="Enter the conversion factor (e.g., 0.001 for km to m)."
-            )
-        with colB:
-            new_name = st.text_input(
-                "New column name (optional)",
-                "",
-                key="uc_new_name",
-                help="Leave blank to overwrite the original column."
-            )
-        with colC:
-            st.caption("Tip: Use this to create normalized units (e.g., convert km to m).")
+        factor = st.number_input(
+            "Conversion factor",
+            min_value=0.0, value=1.0, step=0.1,
+            key="unit_factor",
+            help="Multiply values by this factor (e.g., 0.001 for kg to g)."
+        )
         uc1, uc2, uc3 = st.columns([1, 1, 1])
         with uc1:
-            if st.button("🔍 Preview Unit Conversion", key="preview_unit_convert", help="Preview the effect on a sampled dataset"):
-                if uc_col == "(none)":
+            if st.button("🔍 Preview Unit Conversion", key="preview_unit", help="Preview the effect on a sampled dataset"):
+                if not unit_col:
                     st.warning("Please select a column.")
                     return
-                if factor == 0:
-                    st.error("Factor cannot be zero.")
-                    return
                 prev = sample_for_preview(df)
-                preview_df, msg = unit_convert(prev, uc_col, factor, new_name or None, preview=True)
+                preview_df, msg = unit_convert(prev, unit_col, factor, preview=True)
                 with session_lock:
                     st.session_state.last_preview = (preview_df, msg)
                 st.info(msg)
                 st.dataframe(_arrowize(preview_df.head(10)))
         with uc2:
-            if st.button("📦 Add to Pipeline", key="add_unit_convert", help="Add unit conversion step to the pipeline"):
-                if uc_col == "(none)":
+            if st.button("📦 Add to Pipeline", key="add_unit", help="Add unit conversion step to pipeline"):
+                if not unit_col:
                     st.warning("Please select a column.")
-                    return
-                if factor == 0:
-                    st.error("Factor cannot be zero.")
                     return
                 step = {
                     "kind": "unit_convert",
-                    "params": {"column": uc_col, "factor": float(factor), "new_name": new_name or None}
+                    "params": {"column": unit_col, "factor": factor}
                 }
                 with session_lock:
                     st.session_state.pipeline.append(step)
                 st.success("Added unit conversion step to pipeline.")
         with uc3:
-            if st.button("🔄 Reset Unit Selection", key="reset_unit_convert", help="Clear selected column and options"):
-                st.session_state["uc_col"] = "(none)"
-                st.session_state["uc_factor"] = 1.0
-                st.session_state["uc_new_name"] = ""
+            if st.button("🔄 Reset Unit Selection", key="reset_unit", help="Clear selected column"):
+                st.session_state["unit_col"] = None
                 st.rerun()
 
-        # Unparsable Date Handling
-        st.subheader("Unparsable Date Handling")
-        unparsable_cols = st.multiselect(
-            "Date columns",
-            [c for c in cat_cols],
-            key="unparsable_cols",
-            help="Select columns with potentially unparsable date strings."
-        )
-        unparsable_format = st.text_input(
-            "Target date format",
-            value="%Y-%m-%d",
-            key="unparsable_format",
-            help="Specify the target date format (e.g., %Y-%m-%d) for standardization."
-        )
-        action = st.radio(
-            "Action",
-            ["Standardize", "Drop"],
-            horizontal=True,
-            key="unparsable_action",
-            help="Standardize: Convert to specified format; Drop: Remove selected columns."
-        )
-        ud1, ud2, ud3 = st.columns([1, 1, 1])
-        with ud1:
-            if st.button("🔍 Preview Unparsable Date Handling", key="preview_unparsable", help="Preview the effect on a sampled dataset"):
-                if not unparsable_cols:
-                    st.warning("Please select at least one column.")
-                    return
-                prev = sample_for_preview(df)
-                if action == "Standardize":
-                    preview_df, msg = standardize_dates(prev, unparsable_cols, unparsable_format, preview=True)
+        # Boolean Type Conversion
+        st.subheader("Boolean Type Conversion")
+        bool_cols = []
+        for col in columns:
+            try:
+                if isinstance(df, dd.DataFrame):
+                    is_boolean = df[col].isin([0, 1, '0', '1', True, False]).all().compute()
                 else:
-                    preview_df, msg = drop_missing(prev, axis="columns", columns=unparsable_cols, preview=True)
-                with session_lock:
-                    st.session_state.last_preview = (preview_df, msg)
-                st.info(msg)
-                st.dataframe(_arrowize(preview_df.head(10)))
-        with ud2:
-            if st.button("📦 Add to Pipeline", key="add_unparsable", help="Add unparsable date handling step to the pipeline"):
-                if not unparsable_cols:
-                    st.warning("Please select at least one column.")
-                    return
-                if action == "Standardize":
-                    step = {"kind": "standardize_dates", "params": {"columns": unparsable_cols, "format": unparsable_format}}
-                else:
-                    step = {"kind": "drop_missing", "params": {"axis": "columns", "columns": unparsable_cols}}
-                with session_lock:
-                    st.session_state.pipeline.append(step)
-                st.success(f"Added {action.lower()} step for unparsable dates to pipeline.")
-        with ud3:
-            if st.button("🔄 Reset Unparsable Date Selection", key="reset_unparsable", help="Clear selected columns and options"):
-                st.session_state["unparsable_cols"] = []
-                st.session_state["unparsable_format"] = "%Y-%m-%d"
-                st.session_state["unparsable_action"] = "Standardize"
-                st.rerun()
-
-        # Currency Symbol Handling
-        st.subheader("Currency Symbol Handling")
-        currency_cols = st.multiselect(
-            "Currency columns",
-            [c for c in cat_cols],
-            key="currency_cols",
-            help="Select columns with currency values (e.g., '$100.50')."
-        )
-        currency_factor = st.number_input(
-            "Conversion factor",
-            value=1.0,
-            step=0.1,
-            key="currency_factor",
-            help="Factor to extract numeric values (e.g., 1.0 for no conversion)."
-        )
-        currency_new_name = st.text_input(
-            "New column name (optional)",
-            "",
-            key="currency_new_name",
-            help="Leave blank to overwrite the original column."
-        )
-        cu1, cu2, cu3 = st.columns([1, 1, 1])
-        with cu1:
-            if st.button("🔍 Preview Currency Handling", key="preview_currency", help="Preview the effect on a sampled dataset"):
-                if not currency_cols:
-                    st.warning("Please select at least one column.")
-                    return
-                if currency_factor == 0:
-                    st.error("Conversion factor cannot be zero.")
-                    return
-                prev = sample_for_preview(df)
-                preview_df, msg = unit_convert(prev, currency_cols[0], currency_factor, currency_new_name or None, preview=True)
-                with session_lock:
-                    st.session_state.last_preview = (preview_df, msg)
-                st.info(msg)
-                st.dataframe(_arrowize(preview_df.head(10)))
-        with cu2:
-            if st.button("📦 Add to Pipeline", key="add_currency", help="Add currency handling step to the pipeline"):
-                if not currency_cols:
-                    st.warning("Please select at least one column.")
-                    return
-                if currency_factor == 0:
-                    st.error("Conversion factor cannot be zero.")
-                    return
-                for col in currency_cols:
-                    step = {
-                        "kind": "unit_convert",
-                        "params": {"column": col, "factor": float(currency_factor), "new_name": currency_new_name or None}
-                    }
-                    with session_lock:
-                        st.session_state.pipeline.append(step)
-                st.success(f"Added unit conversion step for {len(currency_cols)} currency columns to pipeline.")
-        with cu3:
-            if st.button("🔄 Reset Currency Selection", key="reset_currency", help="Clear selected columns and options"):
-                st.session_state["currency_cols"] = []
-                st.session_state["currency_factor"] = 1.0
-                st.session_state["currency_new_name"] = ""
-                st.rerun()
-
-        # URL/File-Path Handling
-        st.subheader("URL/File-Path Handling")
-        url_cols = st.multiselect(
-            "URL/File-Path columns",
-            [c for c in cat_cols],
-            key="url_cols",
-            help="Select columns with URLs or file paths."
-        )
-        url_action = st.radio(
-            "Action",
-            ["Extract Domain", "Drop"],
-            horizontal=True,
-            key="url_action",
-            help="Extract Domain: Create new column with domains; Drop: Remove selected columns."
-        )
-        url_new_name = st.text_input(
-            "New column name for domains (optional)",
-            "",
-            key="url_new_name",
-            help="Leave blank to overwrite the original column (if extracting domains).",
-            disabled=url_action == "Drop"
-        )
-        ur1, ur2, ur3 = st.columns([1, 1, 1])
-        with ur1:
-            if st.button("🔍 Preview URL Handling", key="preview_url", help="Preview the effect on a sampled dataset"):
-                if not url_cols:
-                    st.warning("Please select at least one column.")
-                    return
-                prev = sample_for_preview(df)
-                if url_action == "Extract Domain":
-                    preview_df, msg = extract_domain(prev, url_cols[0], url_new_name or None, preview=True)
-                else:
-                    preview_df, msg = drop_missing(prev, axis="columns", columns=url_cols, preview=True)
-                with session_lock:
-                    st.session_state.last_preview = (preview_df, msg)
-                st.info(msg)
-                st.dataframe(_arrowize(preview_df.head(10)))
-        with ur2:
-            if st.button("📦 Add to Pipeline", key="add_url", help="Add URL handling step to the pipeline"):
-                if not url_cols:
-                    st.warning("Please select at least one column.")
-                    return
-                if url_action == "Extract Domain":
-                    for col in url_cols:
-                        step = {"kind": "extract_domain", "params": {"column": col, "new_name": url_new_name or None}}
-                        with session_lock:
-                            st.session_state.pipeline.append(step)
-                    st.success(f"Added extract domain step for {len(url_cols)} columns to pipeline.")
-                else:
-                    step = {"kind": "drop_missing", "params": {"axis": "columns", "columns": url_cols}}
-                    with session_lock:
-                        st.session_state.pipeline.append(step)
-                    st.success(f"Added drop step for {len(url_cols)} URL columns to pipeline.")
-        with ur3:
-            if st.button("🔄 Reset URL Selection", key="reset_url", help="Clear selected columns and options"):
-                st.session_state["url_cols"] = []
-                st.session_state["url_action"] = "Extract Domain"
-                st.session_state["url_new_name"] = ""
-                st.rerun()
-
-        # Boolean-Disguised Handling
-        st.subheader("Boolean-Disguised Handling")
-        bool_cols = st.multiselect(
-            "Boolean columns",
-            [c for c in df.columns if pd.api.types.is_integer_dtype(df[c])],
+                    is_boolean = df[col].isin([0, 1, '0', '1', True, False]).all()
+                if is_boolean:
+                    bool_cols.append(col)
+            except Exception as e:
+                logger.warning(f"Error checking column {col} for boolean data: {e}")
+        
+        bool_cols_selected = st.multiselect(
+            "Columns to convert to boolean",
+            bool_cols,
             key="bool_cols",
-            help="Select integer columns with 0/1 values to cast to boolean."
+            help="Select columns with 0/1 or '0'/'1' values to convert to boolean."
         )
         bo1, bo2, bo3 = st.columns([1, 1, 1])
         with bo1:
-            if st.button("🔍 Preview Boolean Handling", key="preview_bool", help="Preview the effect on a sampled dataset"):
-                if not bool_cols:
+            if st.button("🔍 Preview Boolean Conversion", key="preview_bool", help="Preview the effect on a sampled dataset"):
+                if not bool_cols_selected:
                     st.warning("Please select at least one column.")
                     return
                 prev = sample_for_preview(df)
-                preview_df, msg = type_convert(prev, bool_cols[0], "bool", preview=True)
+                preview_df = prev.copy()
+                msg = ""
+                for col in bool_cols_selected:
+                    preview_df, temp_msg = type_convert(preview_df, col, "bool", preview=True)
+                    msg += f"{temp_msg}\n"
                 with session_lock:
                     st.session_state.last_preview = (preview_df, msg)
                 st.info(msg)
                 st.dataframe(_arrowize(preview_df.head(10)))
         with bo2:
-            if st.button("📦 Add to Pipeline", key="add_bool", help="Add boolean conversion step to the pipeline"):
-                if not bool_cols:
+            if st.button("📦 Add to Pipeline", key="add_bool", help="Add boolean conversion step to pipeline"):
+                if not bool_cols_selected:
                     st.warning("Please select at least one column.")
                     return
-                for col in bool_cols:
+                for col in bool_cols_selected:
                     step = {"kind": "type_convert", "params": {"column": col, "type": "bool"}}
                     with session_lock:
                         st.session_state.pipeline.append(step)
-                st.success(f"Added boolean conversion step for {len(bool_cols)} columns to pipeline.")
+                st.success(f"Added boolean conversion step for {len(bool_cols_selected)} columns to pipeline.")
         with bo3:
             if st.button("🔄 Reset Boolean Selection", key="reset_bool", help="Clear selected columns"):
                 st.session_state["bool_cols"] = []
@@ -392,37 +232,84 @@ def section_inconsistency():
 
         # Numeric-to-Categorical Handling
         st.subheader("Numeric-to-Categorical Handling")
-        cat_cols = st.multiselect(
+        num_cat_cols = st.multiselect(
             "Numeric columns",
-            [c for c in num_cols],
+            [c for c in columns if c in num_cols],
             key="num_cat_cols",
             help="Select numeric columns to convert to categorical."
         )
         nc1, nc2, nc3 = st.columns([1, 1, 1])
         with nc1:
             if st.button("🔍 Preview Categorical Conversion", key="preview_num_cat", help="Preview the effect on a sampled dataset"):
-                if not cat_cols:
+                if not num_cat_cols:
                     st.warning("Please select at least one column.")
                     return
                 prev = sample_for_preview(df)
-                preview_df, msg = type_convert(prev, cat_cols[0], "category", preview=True)
+                preview_df, msg = type_convert(prev, num_cat_cols[0], "category", preview=True)
                 with session_lock:
                     st.session_state.last_preview = (preview_df, msg)
                 st.info(msg)
                 st.dataframe(_arrowize(preview_df.head(10)))
         with nc2:
             if st.button("📦 Add to Pipeline", key="add_num_cat", help="Add categorical conversion step to the pipeline"):
-                if not cat_cols:
+                if not num_cat_cols:
                     st.warning("Please select at least one column.")
                     return
-                for col in cat_cols:
+                for col in num_cat_cols:
                     step = {"kind": "type_convert", "params": {"column": col, "type": "category"}}
                     with session_lock:
                         st.session_state.pipeline.append(step)
-                st.success(f"Added categorical conversion step for {len(cat_cols)} columns to pipeline.")
+                st.success(f"Added categorical conversion step for {len(num_cat_cols)} columns to pipeline.")
         with nc3:
             if st.button("🔄 Reset Categorical Selection", key="reset_num_cat", help="Clear selected columns"):
                 st.session_state["num_cat_cols"] = []
+                st.rerun()
+
+        # Domain Extraction from URLs
+        st.subheader("Domain Extraction from URLs")
+        url_cols = []
+        for col in columns:
+            try:
+                if isinstance(df, dd.DataFrame):
+                    is_url = df[col].astype(str).str.startswith(('http://', 'https://')).any().compute()
+                else:
+                    is_url = df[col].astype(str).str.startswith(('http://', 'https://')).any()
+                if is_url:
+                    url_cols.append(col)
+            except Exception as e:
+                logger.warning(f"Error checking column {col} for URL data: {e}")
+        
+        url_cols_selected = st.multiselect(
+            "URL columns",
+            url_cols,
+            key="url_cols",
+            help="Select columns containing URLs to extract domains from."
+        )
+        de1, de2, de3 = st.columns([1, 1, 1])
+        with de1:
+            if st.button("🔍 Preview Domain Extraction", key="preview_domain", help="Preview domain extraction on a sampled dataset"):
+                if not url_cols_selected:
+                    st.warning("Please select at least one column.")
+                    return
+                prev = sample_for_preview(df)
+                preview_df, msg = extract_domain(prev, url_cols_selected[0], preview=True)
+                with session_lock:
+                    st.session_state.last_preview = (preview_df, msg)
+                st.info(msg)
+                st.dataframe(_arrowize(preview_df.head(10)))
+        with de2:
+            if st.button("📦 Add to Pipeline", key="add_domain", help="Add domain extraction step to pipeline"):
+                if not url_cols_selected:
+                    st.warning("Please select at least one column.")
+                    return
+                for col in url_cols_selected:
+                    step = {"kind": "extract_domain", "params": {"column": col}}
+                    with session_lock:
+                        st.session_state.pipeline.append(step)
+                st.success(f"Added domain extraction step for {len(url_cols_selected)} columns to pipeline.")
+        with de3:
+            if st.button("🔄 Reset URL Selection", key="reset_domain", help="Clear selected columns"):
+                st.session_state["url_cols"] = []
                 st.rerun()
 
     except Exception as e:
