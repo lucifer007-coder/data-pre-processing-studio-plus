@@ -1,6 +1,7 @@
 import logging
 import streamlit as st
 import pandas as pd
+import dask.dataframe as dd
 from utils.data_utils import dtype_split, _arrowize, sample_for_preview
 from preprocessing.steps import impute_missing, drop_missing
 import threading
@@ -20,12 +21,13 @@ def section_missing_data():
     try:
         num_cols, cat_cols = dtype_split(df)
         st.subheader("Missing Values Summary")
-        missing = df.isna().sum()
+        missing = df.isna().sum().compute() if isinstance(df, dd.DataFrame) else df.isna().sum()
         missing = missing[missing > 0]
         if missing.empty:
             st.info("No missing values in the dataset!")
         else:
-            st.dataframe(_arrowize(pd.DataFrame({"Missing Count": missing, "Ratio": missing / len(df)})))
+            total_rows = df.shape[0].compute() if isinstance(df, dd.DataFrame) else len(df)
+            st.dataframe(_arrowize(pd.DataFrame({"Missing Count": missing, "Ratio": missing / total_rows})))
 
         st.subheader("Handle Missing Values")
         option = st.radio(
@@ -73,10 +75,10 @@ def section_missing_data():
                 )
             cols = st.multiselect(
                 "Columns to impute",
-                df.columns.tolist(),
+                df.columns.compute().tolist() if isinstance(df, dd.DataFrame) else df.columns.tolist(),
                 default=missing.index.tolist(),
                 key="impute_cols",
-                help="Select columns with missing values to impute."
+                help="Select columns to impute."
             )
             c1, c2, c3 = st.columns([1, 1, 1])
             with c1:
@@ -85,15 +87,7 @@ def section_missing_data():
                         st.warning("Please select at least one column.")
                         return
                     prev = sample_for_preview(df)
-                    params = {
-                        "columns": cols,
-                        "strategy": strategy,
-                        "constant_value": constant_value,
-                        "n_neighbors": n_neighbors,
-                        "n_estimators": n_estimators,
-                        "preview": True
-                    }
-                    preview_df, msg = impute_missing(prev, **params)
+                    preview_df, msg = impute_missing(prev, cols, strategy, constant_value, n_neighbors, n_estimators, preview=True)
                     with session_lock:
                         st.session_state.last_preview = (preview_df, msg)
                     st.info(msg)
@@ -124,29 +118,30 @@ def section_missing_data():
                     st.session_state["knn_neighbors"] = 5
                     st.session_state["rf_estimators"] = 100
                     st.rerun()
-        else:
+
+        else:  # Drop
             axis = st.radio(
-                "Drop axis",
+                "Drop rows or columns",
                 ["rows", "columns"],
                 horizontal=True,
                 key="drop_axis",
-                help="Drop rows or columns with missing values."
+                help="Drop rows with missing values in selected columns or drop entire columns."
             )
-            threshold = None
-            cols = None
+            threshold = 0.5
+            cols = []
             if axis == "rows":
-                use_threshold = st.checkbox("Use missing ratio threshold", key="drop_threshold", help="Drop rows with a specified missing ratio.")
+                use_threshold = st.checkbox("Use missing ratio threshold", key="drop_threshold", help="Drop rows where missing ratio exceeds threshold.")
                 if use_threshold:
                     threshold = st.slider(
                         "Max missing ratio",
                         0.0, 1.0, 0.5, 0.05,
                         key="drop_threshold_value",
-                        help="Drop rows where the missing ratio exceeds this value."
+                        help="Drop rows where the missing ratio in selected columns exceeds this value."
                     )
                 else:
                     cols = st.multiselect(
                         "Columns to check for dropping rows",
-                        df.columns.tolist(),
+                        df.columns.compute().tolist() if isinstance(df, dd.DataFrame) else df.columns.tolist(),
                         default=missing.index.tolist(),
                         key="drop_cols",
                         help="Select columns to consider for dropping rows."
