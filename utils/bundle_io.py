@@ -1,6 +1,7 @@
 import json
 import base64
 import pandas as pd
+import dask.dataframe as dd
 import streamlit as st
 import logging
 from datetime import datetime
@@ -22,7 +23,10 @@ def export_bundle(sample_mode: bool = False) -> str:
             raise ValueError("No dataset loaded to export.")
 
         # Convert raw_df to CSV and encode as base64
-        csv_buffer = raw_df.head(5000).to_csv(index=False) if sample_mode else raw_df.to_csv(index=False)
+        if isinstance(raw_df, dd.DataFrame):
+            csv_buffer = raw_df.head(5000).compute().to_csv(index=False) if sample_mode else raw_df.compute().to_csv(index=False)
+        else:
+            csv_buffer = raw_df.head(5000).to_csv(index=False) if sample_mode else raw_df.to_csv(index=False)
         raw_csv = base64.b64encode(csv_buffer.encode()).decode()
 
         # Check size limit
@@ -63,8 +67,8 @@ def import_bundle(json_str: str) -> bool:
         bool: True if import succeeds, False otherwise.
     """
     try:
-        # Validate bundle size before parsing
-        if len(json_str) > 20 * 1024 * 1024:  # 20 MB limit for JSON
+        if len(json_str) > 20 * 1024 * 1024:  # 20 MB
+            logger.error("Bundle file is too large (>20 MB).")
             st.error("Bundle file is too large (>20 MB).")
             return False
 
@@ -82,19 +86,12 @@ def import_bundle(json_str: str) -> bool:
             with st.spinner("Decoding dataset..."):
                 decoded_csv = base64.b64decode(bundle["raw_csv"]).decode(bundle.get("encoding", "utf-8"))
                 csv_io = StringIO(decoded_csv)
-            
-            with st.spinner("Loading dataset..."):
-                chunk_size = 10000
-                chunks = pd.read_csv(
-                    csv_io,
-                    encoding=bundle.get("encoding", "utf-8"),
-                    sep=bundle.get("delimiter", ","),
-                    chunksize=chunk_size
-                )
-                df_chunks = []
-                for chunk in chunks:
-                    df_chunks.append(chunk)
-                st.session_state.raw_df = pd.concat(df_chunks, ignore_index=True) if df_chunks else pd.DataFrame()
+                file_size_mb = len(decoded_csv) / 1_000_000
+                if file_size_mb < 100:
+                    df = pd.read_csv(csv_io, encoding=bundle.get("encoding", "utf-8"), sep=bundle.get("delimiter", ","))
+                else:
+                    df = dd.read_csv(csv_io, encoding=bundle.get("encoding", "utf-8"), sep=bundle.get("delimiter", ","), blocksize="64MB")
+                st.session_state.raw_df = df
         else:
             st.session_state.raw_df = None
 
