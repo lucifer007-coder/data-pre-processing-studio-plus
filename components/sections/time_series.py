@@ -1,4 +1,6 @@
 import streamlit as st
+import pandas as pd
+import dask.dataframe as dd
 from utils.data_utils import dtype_split, _arrowize, sample_for_preview
 from preprocessing.steps import smooth_time_series, resample_time_series
 from utils.viz_utils import alt_line_plot
@@ -15,19 +17,16 @@ def section_time_series():
 
     try:
         num_cols, _ = dtype_split(df)
-        datetime_cols = df.select_dtypes(include=["datetime64"]).columns.tolist()
+        datetime_cols = df.select_dtypes(include=["datetime64"]).columns.compute().tolist() if isinstance(df, dd.DataFrame) else df.select_dtypes(include=["datetime64"]).columns.tolist()
         # Include string columns that look like dates
-        date_like_cols = [
-            col for col in df.columns
-            if col not in datetime_cols and df[col].astype(str).str.match(r'\d{4}-\d{2}-\d{2}', na=False).any()
-        ]
+        date_like_cols = [col for col in df.select_dtypes(include=["string"]).columns if any(df[col].str.contains(r'\d{4}-\d{2}-\d{2}').any())]
         datetime_cols.extend(date_like_cols)
         if not num_cols or not datetime_cols:
             st.info("No numeric or datetime/date-like columns available for time-series preprocessing.")
             return
 
         # Warning for large datasets
-        if len(df) > 100_000:
+        if (isinstance(df, dd.DataFrame) and df.shape[0].compute() > 100_000) or (isinstance(df, pd.DataFrame) and len(df) > 100_000):
             st.warning(
                 "Large dataset detected (>100,000 rows). Previews will be sampled, and full processing may be slow. Consider sampling the dataset."
             )
@@ -57,7 +56,7 @@ def section_time_series():
             interpolate = st.selectbox(
                 "Interpolate missing values",
                 ["linear", "ffill", "bfill", "none"],
-                help="Method to handle missing values before smoothing."
+                help="Interpolate missing values before smoothing."
             )
             c1, c2 = st.columns([1, 1])
             with c1:
@@ -67,17 +66,12 @@ def section_time_series():
                         return
                     with st.spinner("Generating smoothing preview..."):
                         prev = sample_for_preview(df)
-                        preview_df, msg = smooth_time_series(
-                            prev, smooth_col, window, smooth_method,
-                            interpolate if interpolate != "none" else None, preview=True
-                        )
+                        preview_df, msg = smooth_time_series(prev, smooth_col, smooth_method, window, interpolate, preview=True)
                         st.session_state.last_preview = (preview_df, msg)
                         st.info(msg)
                         st.dataframe(_arrowize(preview_df.head(10)))
-                        # Find a datetime column for visualization
-                        vis_time_col = datetime_cols[0] if datetime_cols else None
-                        if vis_time_col:
-                            chart = alt_line_plot(preview_df, vis_time_col, smooth_col, "Smoothed Time-Series Preview")
+                        if smooth_col in preview_df.columns and datetime_cols:
+                            chart = alt_line_plot(preview_df, datetime_cols[0], smooth_col, "Smoothed Time-Series Preview")
                             if chart:
                                 st.altair_chart(chart, use_container_width=True)
             with c2:
@@ -87,18 +81,13 @@ def section_time_series():
                         return
                     step = {
                         "kind": "smooth_time_series",
-                        "params": {
-                            "column": smooth_col,
-                            "window": window,
-                            "method": smooth_method,
-                            "interpolate": interpolate if interpolate != "none" else None
-                        }
+                        "params": {"column": smooth_col, "method": smooth_method, "window": window, "interpolate": interpolate}
                     }
                     st.session_state.pipeline.append(step)
                     st.success("Added smoothing step to pipeline.")
 
         with st.expander("Resample Time-Series", expanded=True):
-            st.markdown("**Resample data to a uniform time frequency.**")
+            st.markdown("**Resample time-series data to a different frequency.**")
             time_col = st.selectbox(
                 "Datetime column",
                 datetime_cols,
