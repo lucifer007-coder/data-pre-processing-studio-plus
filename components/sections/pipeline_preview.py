@@ -1,13 +1,20 @@
 import logging
 import streamlit as st
+import pandas as pd
+import dask.dataframe as dd
+from datetime import datetime
 from utils.data_utils import dtype_split, _arrowize, sample_for_preview
 from utils.viz_utils import alt_histogram, alt_line_plot
 from utils.stats_utils import compute_basic_stats
 from preprocessing.pipeline import run_pipeline
 from session import push_history
-from utils.bundle_io import export_bundle
+from utils.bundle_io import export_bundle, import_bundle
+import threading
 
 logger = logging.getLogger(__name__)
+
+# Thread lock for session state updates
+session_lock = threading.Lock()
 
 def section_pipeline_preview():
     st.header("🧪 Pipeline & Preview")
@@ -18,8 +25,9 @@ def section_pipeline_preview():
 
     try:
         # Clear just_imported_bundle flag after first render
-        if st.session_state.get('just_imported_bundle', False):
-            st.session_state.just_imported_bundle = False
+        with session_lock:
+            if st.session_state.get('just_imported_bundle', False):
+                st.session_state.just_imported_bundle = False
 
         st.subheader("Queued Pipeline Steps")
         pipeline = st.session_state.get('pipeline', [])
@@ -39,10 +47,10 @@ def section_pipeline_preview():
                 with st.spinner("Generating pipeline preview..."):
                     prev = sample_for_preview(df)
                     result = run_pipeline(prev, pipeline, preview=True)
-                    # Handle variable return values from run_pipeline
                     if isinstance(result, tuple) and len(result) >= 2:
                         preview_df, msgs = result[:2]
-                        st.session_state.last_preview = (preview_df, "\n".join(msgs))
+                        with session_lock:
+                            st.session_state.last_preview = (preview_df, "\n".join(msgs))
                     else:
                         logger.error(f"Unexpected return format from run_pipeline: {result}")
                         st.error("Error: Invalid pipeline preview result.")
@@ -57,61 +65,103 @@ def section_pipeline_preview():
                     st.write("Before")
                     st.write(f"Shape: {before_stats['shape']}")
                     st.write(f"Missing Values: {before_stats['missing_total']}")
+                    with st.expander("Full Stats"):
+                        st.json(before_stats)
                 with col_stats2:
                     st.write("After Preview")
                     st.write(f"Shape: {after_stats['shape']}")
                     st.write(f"Missing Values: {after_stats['missing_total']}")
+                    with st.expander("Full Stats"):
+                        st.json(after_stats)
 
         with col2:
-            if st.button("🚮 Clear Pipeline", help="Clear all pipeline steps"):
-                st.session_state.pipeline = []
+            if st.button("🗑️ Clear Pipeline", help="Remove all steps from the pipeline"):
+                with session_lock:
+                    st.session_state.pipeline = []
+                    st.session_state.last_preview = None
                 st.success("Pipeline cleared.")
                 st.rerun()
 
         with col3:
-            if st.button("✅ Apply Pipeline", help="Apply pipeline to the full dataset"):
+            if st.button("✅ Apply Pipeline", help="Apply all steps and update the dataset"):
                 if not pipeline:
                     st.warning("Pipeline is empty.")
                     return
                 with st.spinner("Applying pipeline..."):
                     progress_placeholder = st.empty()
-                    tmp_df = df.copy()
+                    tmp_df = df.copy() if isinstance(df, pd.DataFrame) else df
                     for i, step in enumerate(pipeline, 1):
                         progress_placeholder.progress(
                             i / len(pipeline),
                             text=f"Applying step {i}/{len(pipeline)}: {step['kind']}"
                         )
                         result = run_pipeline(tmp_df, [step])
-                        # Handle variable return values from run_pipeline
                         if isinstance(result, tuple) and len(result) >= 2:
                             tmp_df, msg = result[:2]
-                            st.session_state.changelog.extend([f"✅ {m}" for m in msg])
+                            with session_lock:
+                                st.session_state.changelog.extend([f"✅ {m}" for m in msg])
                         else:
                             logger.error(f"Unexpected return format from run_pipeline: {result}")
                             st.error(f"Error: Invalid pipeline application result for step {step['kind']}.")
                             return
                     progress_placeholder.progress(1.0, text="Pipeline application complete")
                     progress_placeholder.empty()
-                    st.session_state.df = tmp_df
+                    with session_lock:
+                        st.session_state.df = tmp_df
+                        push_history(f"Applied pipeline with {len(pipeline)} steps")
+                        st.session_state.last_preview = (tmp_df, "\n".join(msg))
                 st.success("Applied pipeline to full dataset.")
-                st.session_state.pipeline = []
+                st.rerun()
 
-        # Export Session Bundle on a new line
+        # Bundle export section
         st.markdown("---")
-        st.subheader("Export Session Bundle")
-        st.warning("Note: The .dps bundle contains plain-text data, including any PII from the original dataset. Store it securely.")
-        sample_mode = st.checkbox("Sample mode (first 5000 rows)", help="Reduces bundle size for large datasets.")
-        try:
-            if st.download_button(
-                "💾 Export .dps bundle",
-                data=export_bundle(sample_mode),
-                file_name="session.dps",
-                mime="application/json",
-                help="Download a bundle to save your session state."
-            ):
-                st.success("Bundle exported as session.dps.")
-        except ValueError as e:
-            st.error(str(e))
+        st.subheader("Export Pipeline and Dataset")
+        st.warning("Note: The bundle contains plain-text data, including any PII from the original dataset. Store it securely.")
+        export_col1, export_col2 = st.columns([1, 1])
+        
+        with export_col1:
+            sample_mode = st.checkbox(
+                "Sample mode (first 5000 rows)", 
+                help="Export only the first 5000 rows to reduce file size. Recommended for large datasets."
+            )
+        
+        with export_col2:
+            bundle_name = st.text_input(
+                "Bundle name", 
+                value=f"preprocessing_bundle_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+                help="Name for the exported bundle file."
+            )
+        
+        if st.button("📦 Export as Bundle", help="Export pipeline and dataset as a bundle file", type="primary"):
+            try:
+                with st.spinner("Generating bundle..."):
+                    if df is None:
+                        st.error("No dataset loaded. Please upload a dataset first.")
+                        return
+                    bundle_str = export_bundle(sample_mode=sample_mode)
+                    file_extension = ".dps"
+                    mime_type = "application/json"
+                    filename = f"{bundle_name}{file_extension}"
+                    st.success(f"Bundle generated successfully! Size: {len(bundle_str)} characters")
+                    st.download_button(
+                        label="💾 Download Bundle",
+                        data=bundle_str,
+                        file_name=filename,
+                        mime=mime_type,
+                        help="Download the preprocessing pipeline and dataset as a DPS bundle."
+                    )
+                    with st.expander("Bundle Contents Preview", expanded=False):
+                        st.json({
+                            "version": "1.0",
+                            "dataset_shape": df.shape.compute() if isinstance(df, dd.DataFrame) else df.shape,
+                            "pipeline_steps": len(pipeline),
+                            "changelog_entries": len(st.session_state.get('changelog', [])),
+                            "sample_mode": sample_mode
+                        })
+            except Exception as e:
+                logger.error(f"Error exporting bundle: {e}")
+                st.error(f"Error generating bundle: {e}")
+                st.error(f"Details: {str(e)}")
 
         st.markdown("---")
         if st.session_state.last_preview is not None:
@@ -122,7 +172,8 @@ def section_pipeline_preview():
             st.dataframe(_arrowize(prev_df.head(10)))
 
             num_cols, _ = dtype_split(prev_df)
-            datetime_cols = prev_df.select_dtypes(include=["datetime64"]).columns.tolist()
+            datetime_cols = prev_df.select_dtypes(include=["datetime64"]).columns.compute().tolist() if isinstance(prev_df, dd.DataFrame) else prev_df.select_dtypes(include=["datetime64"]).columns.tolist()
+            
             if num_cols or datetime_cols:
                 st.subheader("Visualize Preview")
                 vis_type = st.radio("Visualization type", ["Histogram", "Time-Series"], horizontal=True)
