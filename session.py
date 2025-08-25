@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+import dask.dataframe as dd
 
 def init_session():
     """Initialize session state with default values."""
@@ -50,7 +51,10 @@ def push_history(description: str):
         description (str): Description of the action for changelog.
     """
     if st.session_state.get('df') is not None:
-        st.session_state.history.append(st.session_state.df.copy())
+        if isinstance(st.session_state.df, dd.DataFrame):
+            st.session_state.history.append(st.session_state.df.copy())
+        else:
+            st.session_state.history.append(st.session_state.df.copy())
         st.session_state.changelog.append(f"📝 {description}")
     else:
         st.warning("No dataset to save in history.")
