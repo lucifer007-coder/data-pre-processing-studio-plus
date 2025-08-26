@@ -42,6 +42,7 @@ class PreprocessingRecommendations:
             missing_counts = df.isnull().sum()
             total_rows = len(df)
             columns = df.columns.tolist()
+            
         if missing_ratio.max() > 0.1:
             missing_cols = missing_ratio[missing_ratio > 0.1].index.tolist()
             for col in missing_cols:
@@ -277,9 +278,14 @@ def section_recommendations():
     """
     st.header("🔍 Data Quality Recommendations")
     df = st.session_state.get('df', None)
+    
     if df is None:
         st.warning("Upload a dataset first.")
         return
+
+    # Initialize pipeline in session state if it doesn't exist
+    if 'pipeline' not in st.session_state:
+        st.session_state.pipeline = []
 
     try:
         total_rows = df.shape[0].compute() if isinstance(df, dd.DataFrame) else len(df)
@@ -317,7 +323,7 @@ def section_recommendations():
                 elif rec['type'] == 'outliers':
                     pipeline_steps.append({"kind": "outliers", "params": {"columns": [rec['column']], "method": "iqr", "factor": 1.5}})
                 elif rec['type'] in ['bias_risk', 'class_imbalance']:
-                    pipeline_steps.append({"kind": "rebalance", "params": {"target": col1, "method": "oversample", "ratio": 1.0}})
+                    pipeline_steps.append({"kind": "rebalance", "params": {"target": rec['column'], "method": "oversample", "ratio": 1.0}})
                 elif rec['type'] == 'duplicates':
                     pipeline_steps.append({"kind": "duplicates", "params": {"subset": None, "keep": "first"}})
                 elif rec['type'] == 'high_cardinality':
@@ -336,9 +342,10 @@ def section_recommendations():
                     pipeline_steps.append({"kind": "type_convert", "params": {"column": rec['column'], "type": "bool"}})
                 elif rec['type'] == 'wide_numeric_range':
                     pipeline_steps.append({"kind": "scale", "params": {"columns": [rec['column']], "method": "standard"}})
-            with session_lock:
-                st.session_state.pipeline.extend(pipeline_steps)
+            
+            st.session_state.pipeline.extend(pipeline_steps)
             st.success(f"Added {len(pipeline_steps)} recommended actions to the pipeline.")
+            st.rerun()
 
         # Tabbed Layout for Recommendations
         tabs = st.tabs(["All", "High Priority", "Medium Priority", "Low Priority"])
@@ -349,19 +356,26 @@ def section_recommendations():
             "Low Priority": (0.0, 0.6)
         }
 
-        key_counter = st.session_state.get("recommendation_key_counter", 0)
-        for tab_name, (min_priority, max_priority) in priority_filters.items():
-            with tabs[list(priority_filters.keys()).index(tab_name)]:
+        # Initialize key counter if not exists
+        if "recommendation_key_counter" not in st.session_state:
+            st.session_state.recommendation_key_counter = 0
+
+        for tab_idx, (tab_name, (min_priority, max_priority)) in enumerate(priority_filters.items()):
+            with tabs[tab_idx]:
                 filtered_recs = [r for r in recommendations if min_priority <= r.get('priority', 0.5) <= max_priority]
                 if not filtered_recs:
                     st.info(f"No {tab_name.lower()} recommendations.")
                     continue
+                    
                 st.markdown(f"**{tab_name} Recommendations ({len(filtered_recs)})**")
-                for rec in filtered_recs:
-                    key_suffix = f"{tab_name.replace(' ', '_')}_{rec['type']}_{rec.get('column', '')}_{key_counter}"
+                
+                for rec_idx, rec in enumerate(filtered_recs):
+                    unique_key = f"{tab_name.replace(' ', '_')}_{rec['type']}_{rec.get('column', 'no_col')}_{rec_idx}_{st.session_state.recommendation_key_counter}"
+                    
                     with st.expander(f"{rec['type'].replace('_', ' ').title()} (Priority: {rec.get('priority', 0.5):.2f})"):
                         st.markdown(f"**Issue**: {rec['type'].replace('_', ' ').title()}")
                         st.markdown(f"**Suggestion**: {rec['suggestion']}")
+                        
                         if 'column' in rec:
                             st.markdown(f"**Column**: `{rec['column']}`")
                         if 'missing_count' in rec:
@@ -383,104 +397,137 @@ def section_recommendations():
 
                         # Actionable Buttons
                         col1, col2 = st.columns(2)
+                        
                         if rec['type'] == 'missing_data':
                             with col1:
-                                if st.button(f"📦 Impute ({'Mean' if rec['column'] in dtype_split(df)[0] else 'Mode'})", key=f"impute_{key_suffix}", help="Fill missing values with mean (numeric) or mode (categorical)."):
+                                if st.button(f"📦 Impute ({'Mean' if rec['column'] in dtype_split(df)[0] else 'Mode'})", 
+                                           key=f"impute_{unique_key}", 
+                                           help="Fill missing values with mean (numeric) or mode (categorical)."):
                                     strategy = 'mean' if rec['column'] in dtype_split(df)[0] else 'mode'
                                     step = {"kind": "impute", "params": {"columns": [rec['column']], "strategy": strategy}}
-                                    with session_lock:
-                                        st.session_state.pipeline.append(step)
+                                    st.session_state.pipeline.append(step)
                                     st.success("Added imputation step to pipeline.")
+                                    st.rerun()
                             with col2:
-                                if st.button(f"📦 Drop Column", key=f"drop_{key_suffix}", help="Remove the column with missing values."):
+                                if st.button(f"📦 Drop Column", 
+                                           key=f"drop_{unique_key}", 
+                                           help="Remove the column with missing values."):
                                     step = {"kind": "drop_missing", "params": {"axis": "columns", "columns": [rec['column']]}}
-                                    with session_lock:
-                                        st.session_state.pipeline.append(step)
+                                    st.session_state.pipeline.append(step)
                                     st.success("Added drop column step to pipeline.")
+                                    st.rerun()
+                                    
                         elif rec['type'] in ['outliers', 'high_skew']:
                             with col1:
-                                if st.button(f"📦 Handle Outliers/Skew", key=f"outliers_{key_suffix}", help="Cap outliers or apply log transformation."):
+                                if st.button(f"📦 Handle Outliers/Skew", 
+                                           key=f"outliers_{unique_key}", 
+                                           help="Cap outliers or apply log transformation."):
                                     step = {"kind": "outliers", "params": {"columns": [rec['column']], "method": "iqr", "factor": 1.5}}
-                                    with session_lock:
-                                        st.session_state.pipeline.append(step)
+                                    st.session_state.pipeline.append(step)
                                     st.success("Added outlier/skew handling step to pipeline.")
+                                    st.rerun()
+                                    
                         elif rec['type'] in ['bias_risk', 'class_imbalance']:
                             with col1:
-                                if st.button(f"📦 Rebalance", key=f"rebalance_{key_suffix}", help="Oversample minority classes to balance the dataset."):
+                                if st.button(f"📦 Rebalance", 
+                                           key=f"rebalance_{unique_key}", 
+                                           help="Oversample minority classes to balance the dataset."):
                                     step = {"kind": "rebalance", "params": {"target": rec['column'], "method": "oversample", "ratio": 1.0}}
-                                    with session_lock:
-                                        st.session_state.pipeline.append(step)
+                                    st.session_state.pipeline.append(step)
                                     st.success("Added rebalancing step to pipeline.")
+                                    st.rerun()
+                                    
                         elif rec['type'] == 'duplicates':
                             with col1:
-                                if st.button(f"📦 Remove Duplicates", key=f"duplicates_{key_suffix}", help="Remove duplicate rows, keeping the first occurrence."):
+                                if st.button(f"📦 Remove Duplicates", 
+                                           key=f"duplicates_{unique_key}", 
+                                           help="Remove duplicate rows, keeping the first occurrence."):
                                     step = {"kind": "duplicates", "params": {"subset": None, "keep": "first"}}
-                                    with session_lock:
-                                        st.session_state.pipeline.append(step)
+                                    st.session_state.pipeline.append(step)
                                     st.success("Added duplicate removal step to pipeline.")
+                                    st.rerun()
+                                    
                         elif rec['type'] == 'high_cardinality':
                             with col1:
-                                if st.button(f"📦 Frequency Encode", key=f"freq_encode_{key_suffix}", help="Apply frequency encoding to high-cardinality column."):
+                                if st.button(f"📦 Frequency Encode", 
+                                           key=f"freq_encode_{unique_key}", 
+                                           help="Apply frequency encoding to high-cardinality column."):
                                     step = {"kind": "encode", "params": {"columns": [rec['column']], "method": "frequency_encode"}}
-                                    with session_lock:
-                                        st.session_state.pipeline.append(step)
+                                    st.session_state.pipeline.append(step)
                                     st.success("Added frequency encoding step to pipeline.")
+                                    st.rerun()
                             with col2:
-                                if st.button(f"📦 Hashing Encode", key=f"hash_encode_{key_suffix}", help="Apply hashing encoding to high-cardinality column."):
+                                if st.button(f"📦 Hashing Encode", 
+                                           key=f"hash_encode_{unique_key}", 
+                                           help="Apply hashing encoding to high-cardinality column."):
                                     step = {"kind": "encode", "params": {"columns": [rec['column']], "method": "hashing_encode", "n_components": 8}}
-                                    with session_lock:
-                                        st.session_state.pipeline.append(step)
+                                    st.session_state.pipeline.append(step)
                                     st.success("Added hashing encoding step to pipeline.")
+                                    st.rerun()
+                                    
                         elif rec['type'] == 'constant_category':
                             with col1:
-                                if st.button(f"📦 Drop Column", key=f"drop_const_{key_suffix}", help="Remove constant or quasi-constant column."):
+                                if st.button(f"📦 Drop Column", 
+                                           key=f"drop_const_{unique_key}", 
+                                           help="Remove constant or quasi-constant column."):
                                     step = {"kind": "drop_missing", "params": {"axis": "columns", "columns": [rec['column']]}}
-                                    with session_lock:
-                                        st.session_state.pipeline.append(step)
+                                    st.session_state.pipeline.append(step)
                                     st.success("Added drop column step to pipeline.")
+                                    st.rerun()
+                                    
                         elif rec['type'] == 'id_leakage':
                             with col1:
-                                if st.button(f"📦 Drop Column", key=f"drop_id_{key_suffix}", help="Remove ID-like column to avoid leakage."):
+                                if st.button(f"📦 Drop Column", 
+                                           key=f"drop_id_{unique_key}", 
+                                           help="Remove ID-like column to avoid leakage."):
                                     step = {"kind": "drop_missing", "params": {"axis": "columns", "columns": [rec['column']]}}
-                                    with session_lock:
-                                        st.session_state.pipeline.append(step)
+                                    st.session_state.pipeline.append(step)
                                     st.success("Added drop column step to pipeline.")
+                                    st.rerun()
+                                    
                         elif rec['type'] == 'rare_categories':
                             with col1:
-                                if st.button(f"📦 Group Rare Categories", key=f"encode_rare_{key_suffix}", help="Group rare categories into 'Rare' bucket."):
+                                if st.button(f"📦 Group Rare Categories", 
+                                           key=f"encode_rare_{unique_key}", 
+                                           help="Group rare categories into 'Rare' bucket."):
                                     step = {"kind": "encode", "params": {"columns": [rec['column']], "method": "onehot", "max_categories": 10}}
-                                    with session_lock:
-                                        st.session_state.pipeline.append(step)
+                                    st.session_state.pipeline.append(step)
                                     st.success("Added encoding step with rare category grouping to pipeline.")
+                                    st.rerun()
+                                    
                         elif rec['type'] == 'numeric_to_categorical':
                             with col1:
-                                if st.button(f"📦 Cast to Categorical", key=f"cast_cat_{key_suffix}", help="Convert numeric to categorical type."):
+                                if st.button(f"📦 Cast to Categorical", 
+                                           key=f"cast_cat_{unique_key}", 
+                                           help="Convert numeric to categorical type."):
                                     step = {"kind": "type_convert", "params": {"column": rec['column'], "type": "category"}}
-                                    with session_lock:
-                                        st.session_state.pipeline.append(step)
+                                    st.session_state.pipeline.append(step)
                                     st.success("Added type conversion to categorical step to pipeline.")
+                                    st.rerun()
+                                    
                         elif rec['type'] == 'boolean_disguised':
                             with col1:
-                                if st.button(f"📦 Cast to Boolean", key=f"cast_bool_{key_suffix}", help="Convert 0/1 integer to boolean."):
+                                if st.button(f"📦 Cast to Boolean", 
+                                           key=f"cast_bool_{unique_key}", 
+                                           help="Convert 0/1 integer to boolean."):
                                     step = {"kind": "type_convert", "params": {"column": rec['column'], "type": "bool"}}
-                                    with session_lock:
-                                        st.session_state.pipeline.append(step)
+                                    st.session_state.pipeline.append(step)
                                     st.success("Added type conversion to boolean step to pipeline.")
+                                    st.rerun()
+                                    
                         elif rec['type'] == 'wide_numeric_range':
                             with col1:
-                                if st.button(f"📦 Scale Column", key=f"scale_{key_suffix}", help="Apply standard scaling to normalize range."):
+                                if st.button(f"📦 Scale Column", 
+                                           key=f"scale_{unique_key}", 
+                                           help="Apply standard scaling to normalize range."):
                                     step = {"kind": "scale", "params": {"columns": [rec['column']], "method": "standard"}}
-                                    with session_lock:
-                                        st.session_state.pipeline.append(step)
+                                    st.session_state.pipeline.append(step)
                                     st.success("Added scaling step to pipeline.")
-                    key_counter += 1
-                with session_lock:
-                    st.session_state["recommendation_key_counter"] = key_counter
+                                    st.rerun()
 
         if st.button("🔄 Clear Recommendations", help="Reset recommendations and clear preview"):
-            with session_lock:
-                st.session_state.last_preview = None
-                st.session_state["recommendation_key_counter"] = key_counter + 1
+            st.session_state.last_preview = None
+            st.session_state.recommendation_key_counter += 1
             st.rerun()
 
         st.markdown("---")
