@@ -15,6 +15,8 @@ from components.sections.pipeline_preview import section_pipeline_preview
 from components.sections.dashboard_download import section_dashboard_download
 from components.sections.time_series import section_time_series
 from components.sections.text import section_text
+from components.sections.dashboard import section_dashboard
+from components.sections.export import section_export
 from session import init_session
 
 # Fix module imports
@@ -54,12 +56,14 @@ def main():
             section_imbalanced()
         elif section == "Pipeline & Preview":
             section_pipeline_preview()
-        elif section == "Dashboard & Download":
-            section_dashboard_download()
         elif section == "Time-Series Preprocessing":
             section_time_series()
         elif section == "Text Preprocessing":
             section_text()
+        elif section == "Dashboard":
+            section_dashboard()
+        elif section == "Export":
+            section_export()
 
         st.markdown("---")
         st.caption(
