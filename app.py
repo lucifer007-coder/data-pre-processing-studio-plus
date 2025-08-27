@@ -12,8 +12,10 @@ from components.sections.encoding import section_encoding
 from components.sections.scaling import section_scaling
 from components.sections.imbalanced import section_imbalanced
 from components.sections.pipeline_preview import section_pipeline_preview
-from components.sections.dashboard_download import section_dashboard_download
+from components.sections.dashboard import section_dashboard
+from components.sections.export import section_export
 from components.sections.time_series import section_time_series
+from components.sections.feature_engineering import section_feature_engineering
 from components.sections.text import section_text
 from session import init_session
 
@@ -54,12 +56,14 @@ def main():
             section_imbalanced()
         elif section == "Pipeline & Preview":
             section_pipeline_preview()
-        elif section == "Dashboard & Download":
-            section_dashboard_download()
+        elif section == "Dashboard":
+            section_dashboard()
         elif section == "Time-Series Preprocessing":
             section_time_series()
         elif section == "Text Preprocessing":
             section_text()
+        elif section == "Export":
+            section_export()
 
         st.markdown("---")
         st.caption(
