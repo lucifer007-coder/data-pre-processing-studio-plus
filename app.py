@@ -12,7 +12,6 @@ from components.sections.encoding import section_encoding
 from components.sections.scaling import section_scaling
 from components.sections.imbalanced import section_imbalanced
 from components.sections.pipeline_preview import section_pipeline_preview
-from components.sections.dashboard_download import section_dashboard_download
 from components.sections.time_series import section_time_series
 from components.sections.text import section_text
 from components.sections.dashboard import section_dashboard
