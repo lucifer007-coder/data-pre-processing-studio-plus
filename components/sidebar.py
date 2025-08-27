@@ -18,7 +18,7 @@ def sidebar_navigation() -> str:
             "Time-Series Preprocessing",
             "Text Preprocessing",
             "Pipeline & Preview",
-            "Dashboard"
+            "Dashboard",
             "Export",
         ],
         help="Choose what you want to work on.",
