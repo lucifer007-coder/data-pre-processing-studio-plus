@@ -15,3 +15,4 @@ dask[distributed]>=2024.8.2
 pyyaml>=6.0.2
 joblib>=1.4.2
 sqlparse>=0.5.3
+duckdb
