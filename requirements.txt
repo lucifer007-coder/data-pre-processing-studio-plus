@@ -17,3 +17,4 @@ sqlparse
 SQLite >=3.50.2
 yaml
 joblib
+tempfile
