@@ -1,3 +1,5 @@
+# Recommended dependencies: Streamlit >=1.43.2 (for CVE fixes), SQLite >=3.50.2 (for CVE-2025-6965, CVE-2025-29087),
+# Python/pandas/numpy up-to-date (for CVE-2025-4517, CVE-2025-0185), avoid untrusted Dask inputs (CVE-2024-10096).
 import streamlit as st
 import pandas as pd
 import dask.dataframe as dd
@@ -6,6 +8,12 @@ import json
 import gzip
 import openpyxl
 import numpy as np
+import sqlite3
+import yaml
+import joblib
+import tempfile
+import os
+from sklearn.pipeline import Pipeline
 from utils.stats_utils import compute_basic_stats, compare_stats
 from utils.viz_utils import alt_histogram
 from utils.data_utils import sample_for_preview
@@ -34,12 +42,13 @@ def initialize_session_state():
         st.session_state.changelog = []
     if "pipeline" not in st.session_state:
         st.session_state.pipeline = []
-    if "session_lock" not in st.session_state:
-        logger.warning("session_lock not found in session_state. Initializing new lock.")
-        st.session_state.session_lock = threading.Lock()
+    # Always initialize session_lock to prevent race conditions
+    st.session_state.session_lock = threading.Lock()
 
 def detect_pii(df):
     """Basic PII detection for common patterns (e.g., email, phone)."""
+    if df.empty:
+        return []  # Prevent division by zero for empty DataFrames
     pii_patterns = {
         "email": r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b",
         "phone": r"\b(\+\d{1,3}[- ]?)?\(?\d{3}\)?[- ]?\d{3}[- ]?\d{4}\b",
@@ -48,11 +57,24 @@ def detect_pii(df):
     }
     pii_columns = []
     for col in df.select_dtypes(include=["object"]).columns:
-        sample_df = df[col].sample(frac=min(1, 1000 / df.shape[0].compute()), random_state=42).compute() if isinstance(df, dd.DataFrame) else df[col].head(1000)
+        sample_size = min(1000, df.shape[0].compute() if isinstance(df, dd.DataFrame) else len(df))
+        if sample_size == 0:
+            continue
+        sample_df = df[col].sample(frac=sample_size / df.shape[0].compute(), random_state=42).compute() if isinstance(df, dd.DataFrame) else df[col].head(sample_size)
         for pii_type, pattern in pii_patterns.items():
             if sample_df.astype(str).str.contains(pattern, regex=True, na=False).any():
                 pii_columns.append((col, pii_type))
     return pii_columns
+
+def mask_pii(df, pii_columns):
+    """Mask detected PII columns with [REDACTED]."""
+    df_copy = df.copy()
+    for col, _ in pii_columns:
+        if isinstance(df_copy, dd.DataFrame):
+            df_copy[col] = df_copy[col].map(lambda x: '[REDACTED]' if pd.notna(x) else x, meta=(col, 'object'))
+        else:
+            df_copy[col] = df_copy[col].apply(lambda x: '[REDACTED]' if pd.notna(x) else x)
+    return df_copy
 
 def make_json_serializable(obj):
     """Convert non-serializable objects (e.g., extension dtypes) to JSON-serializable types."""
@@ -61,16 +83,31 @@ def make_json_serializable(obj):
     elif isinstance(obj, list):
         return [make_json_serializable(item) for item in obj]
     elif is_extension_array_dtype(obj):
-        return str(obj)  # Convert Pandas/Dask extension dtypes (e.g., Int64DType) to strings
+        return str(obj)
     elif isinstance(obj, (pd.Series, pd.DataFrame)):
-        return obj.to_dict()  # Convert Series/DataFrame to dict
+        return obj.to_dict()
     elif isinstance(obj, (np.integer, np.floating)):
-        return obj.item()  # Convert NumPy types to Python scalars
+        return obj.item()
+    elif hasattr(obj, '__dict__'):
+        return str(obj)  # Convert objects with __dict__ (e.g., estimators) to strings
     return obj
 
-@st.cache_data(hash_funcs={pd.DataFrame: lambda df: pd.util.hash_pandas_object(df).sum(), dd.DataFrame: lambda df: pd.util.hash_pandas_object(df.compute()).sum()})
+def validate_pipeline_steps(pipeline):
+    """Validate that pipeline steps are compatible with sklearn Pipeline."""
+    if not isinstance(pipeline, list):
+        return False
+    for step in pipeline:
+        if not (isinstance(step, tuple) and len(step) == 2 and isinstance(step[0], str)):
+            return False
+        # Basic check for estimator-like objects (has fit/transform)
+        if not (hasattr(step[1], 'fit') or hasattr(step[1], 'transform')):
+            return False
+    return True
+
+@st.cache_data(hash_funcs={pd.DataFrame: lambda df: pd.util.hash_pandas_object(df.head(1000)).sum(),
+                          dd.DataFrame: lambda df: pd.util.hash_pandas_object(df.head(1000).compute()).sum()})
 def cached_compute_basic_stats(df):
-    """Cached computation of basic statistics."""
+    """Cached computation of basic statistics, hashing only a sample."""
     try:
         return compute_basic_stats(df)
     except Exception as e:
@@ -133,48 +170,78 @@ def section_export():
 
         # Pipeline and Metadata Export
         st.subheader("Export Pipeline and Metadata")
-        c1, c2 = st.columns(2)
+        c1, c2, c3 = st.columns(3)
         with c1:
-            try:
-                with st.session_state.session_lock:
-                    pipeline_data = json.dumps(st.session_state.pipeline, ensure_ascii=False)
-                st.download_button(
-                    "📜 Pipeline JSON",
-                    data=pipeline_data,
-                    file_name="preprocessing_pipeline.json",
-                    mime="application/json",
-                    help="Download the preprocessing pipeline as a JSON file."
-                )
-            except AttributeError:
-                logger.warning("session_lock not found. Proceeding without lock for pipeline export.")
-                pipeline_data = json.dumps(st.session_state.pipeline, ensure_ascii=False)
-                st.download_button(
-                    "📜 Pipeline JSON",
-                    data=pipeline_data,
-                    file_name="preprocessing_pipeline.json",
-                    mime="application/json",
-                    help="Download the preprocessing pipeline as a JSON file."
-                )
-            except Exception as e:
-                logger.error(f"Failed to export pipeline: {e}")
-                st.error(f"Failed to export pipeline: {e}. Ensure pipeline data is valid.")
+            with st.session_state.session_lock:
+                try:
+                    pipeline_data = json.dumps(make_json_serializable(st.session_state.pipeline), ensure_ascii=False)
+                    st.download_button(
+                        "📜 Pipeline JSON",
+                        data=pipeline_data,
+                        file_name="preprocessing_pipeline.json",
+                        mime="application/json",
+                        help="Download the preprocessing pipeline as a JSON file."
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to export pipeline JSON: {e}")
+                    st.error(f"Failed to export pipeline JSON: {e}. Ensure pipeline data is valid.")
+        with c2:
+            with st.session_state.session_lock:
+                try:
+                    pipeline_data_yaml = yaml.dump(make_json_serializable(st.session_state.pipeline), allow_unicode=True)
+                    st.download_button(
+                        "📜 Pipeline YAML",
+                        data=pipeline_data_yaml,
+                        file_name="preprocessing_pipeline.yaml",
+                        mime="text/yaml",
+                        help="Download the preprocessing pipeline as a YAML file."
+                    )
+                except ImportError:
+                    st.error("YAML export requires pyyaml. Install it to enable this feature.")
+                except Exception as e:
+                    logger.error(f"Failed to export YAML pipeline: {e}")
+                    st.error(f"Failed to export YAML pipeline: {e}. Ensure pipeline data is valid.")
+        with c3:
+            with st.session_state.session_lock:
+                try:
+                    if not validate_pipeline_steps(st.session_state.pipeline):
+                        raise ValueError("Invalid pipeline format for Scikit-learn Pipeline")
+                    pipeline_obj = Pipeline(st.session_state.pipeline)
+                    buf = io.BytesIO()
+                    joblib.dump(pipeline_obj, buf)
+                    buf.seek(0)
+                    st.download_button(
+                        "📦 Pipeline Object",
+                        data=buf.getvalue(),
+                        file_name="preprocessing_pipeline.pkl",
+                        mime="application/octet-stream",
+                        help="Download the preprocessing pipeline as a Scikit-learn Pipeline object."
+                    )
+                except ImportError:
+                    st.error("Pipeline object export requires scikit-learn and joblib. Install them to enable this feature.")
+                except Exception as e:
+                    logger.error(f"Failed to export Scikit-learn Pipeline: {e}")
+                    st.error(f"Failed to export Scikit-learn Pipeline: {e}. Ensure pipeline is compatible with sklearn.Pipeline.")
 
         # Export Options
         st.header("Export Options")
-        pii_columns = detect_pii(df)
-        if pii_columns:
-            st.warning(
-                f"Potential PII detected in columns: {', '.join([col for col, pii_type in pii_columns])}. "
-                "Consider masking sensitive data before export."
-            )
-        st.warning("Exported files contain plain-text data, including any PII. Store them securely.")
-
         if df.empty:
             st.error("Cannot export an empty dataset.")
             return
 
         if total_rows > 100_000:
             st.warning("Exporting large datasets may take time and consume significant memory.")
+
+        pii_columns = detect_pii(df)
+        if pii_columns:
+            st.warning(
+                f"Potential PII detected in columns: {', '.join([col for col, pii_type in pii_columns])}. "
+                "Consider masking sensitive data before export."
+            )
+            mask_pii_option = st.checkbox("Mask PII before export (replaces sensitive data with [REDACTED])", key="mask_pii")
+        else:
+            mask_pii_option = False
+        st.warning("Exported files may contain sensitive data, including any PII. Store them securely.")
 
         # Column/Row Subset Selection
         st.subheader("Customize Export")
@@ -193,12 +260,14 @@ def section_export():
                 help="Choose specific columns to include in the export."
             )
         else:
-            export_cols = df.columns.tolist()  # Use all columns
+            export_cols = df.columns.tolist()
 
         if not export_cols:
             st.warning("No columns selected. Please choose at least one column or select 'All columns'.")
             return
         export_df = df[export_cols]
+        if mask_pii_option and pii_columns:
+            export_df = mask_pii(export_df, pii_columns)
 
         row_filter = st.text_input(
             "Enter row filter (pandas query)",
@@ -208,12 +277,19 @@ def section_export():
         )
         if row_filter:
             try:
-                export_df = export_df.query(row_filter)
+                if isinstance(export_df, dd.DataFrame):
+                    try:
+                        export_df = export_df.query(row_filter)
+                    except NotImplementedError:
+                        st.warning("Complex query not supported by Dask. Converting to Pandas for filtering.")
+                        export_df = export_df.compute().query(row_filter)
+                else:
+                    export_df = export_df.query(row_filter)
             except Exception as e:
                 st.error(f"Invalid row filter: {e}")
                 return
 
-        c1, c2, c3, c4, c5 = st.columns(5)
+        c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
         with c1:
             buf = io.StringIO()
             export_df.compute().to_csv(buf, index=False) if isinstance(export_df, dd.DataFrame) else export_df.to_csv(buf, index=False)
@@ -225,10 +301,18 @@ def section_export():
                 help="Download the processed dataset as a CSV file."
             )
         with c2:
-            buf = io.BytesIO()
             try:
                 import pyarrow
-                export_df.compute().to_parquet(buf, index=False, engine='pyarrow') if isinstance(export_df, dd.DataFrame) else export_df.to_parquet(buf, index=False, engine='pyarrow')
+                if isinstance(export_df, dd.DataFrame):
+                    with st.spinner("Writing Parquet file..."):
+                        export_df.to_parquet("temp_parquet", index=False, engine='pyarrow')
+                        with open("temp_parquet/part.0.parquet", "rb") as f:
+                            buf = io.BytesIO(f.read())
+                        import shutil
+                        shutil.rmtree("temp_parquet")
+                else:
+                    buf = io.BytesIO()
+                    export_df.to_parquet(buf, index=False, engine='pyarrow')
                 st.download_button(
                     "💾 Parquet",
                     data=buf.getvalue(),
@@ -242,6 +326,31 @@ def section_export():
                 logger.error(f"Failed to export Parquet: {e}")
                 st.error(f"Failed to export Parquet: {e}")
         with c3:
+            try:
+                import pyarrow
+                if isinstance(export_df, dd.DataFrame):
+                    with st.spinner("Writing Parquet (Snappy) file..."):
+                        export_df.to_parquet("temp_parquet_snappy", index=False, engine='pyarrow', compression='snappy')
+                        with open("temp_parquet_snappy/part.0.parquet", "rb") as f:
+                            buf = io.BytesIO(f.read())
+                        import shutil
+                        shutil.rmtree("temp_parquet_snappy")
+                else:
+                    buf = io.BytesIO()
+                    export_df.to_parquet(buf, index=False, engine='pyarrow', compression='snappy')
+                st.download_button(
+                    "💾 Parquet (Snappy)",
+                    data=buf.getvalue(),
+                    file_name="preprocessed_data_snappy.parquet",
+                    mime="application/octet-stream",
+                    help="Download the processed dataset as a Parquet file with Snappy compression."
+                )
+            except ImportError:
+                st.error("Parquet export requires pyarrow. Install it to enable this feature.")
+            except Exception as e:
+                logger.error(f"Failed to export Parquet (Snappy): {e}")
+                st.error(f"Failed to export Parquet (Snappy): {e}")
+        with c4:
             buf = io.BytesIO()
             try:
                 export_df.compute().to_excel(buf, index=False, engine='openpyxl') if isinstance(export_df, dd.DataFrame) else export_df.to_excel(buf, index=False, engine='openpyxl')
@@ -257,7 +366,7 @@ def section_export():
             except Exception as e:
                 logger.error(f"Failed to export Excel: {e}")
                 st.error(f"Failed to export Excel: {e}")
-        with c4:
+        with c5:
             buf = io.BytesIO()
             try:
                 export_df.compute().to_feather(buf, compression='zstd') if isinstance(export_df, dd.DataFrame) else export_df.to_feather(buf, compression='zstd')
@@ -273,7 +382,7 @@ def section_export():
             except Exception as e:
                 logger.error(f"Failed to export Feather: {e}")
                 st.error(f"Failed to export Feather: {e}")
-        with c5:
+        with c6:
             buf = io.BytesIO()
             try:
                 with gzip.GzipFile(fileobj=buf, mode='wb') as f:
@@ -288,6 +397,36 @@ def section_export():
             except Exception as e:
                 logger.error(f"Failed to export compressed CSV: {e}")
                 st.error(f"Failed to export compressed CSV: {e}")
+        with c7:
+            buf = io.BytesIO()
+            try:
+                conn = sqlite3.connect(':memory:')
+                export_df.compute().to_sql('data', conn, index=False, if_exists='replace') if isinstance(export_df, dd.DataFrame) else export_df.to_sql('data', conn, index=False, if_exists='replace')
+                conn.commit()
+                # Create a temporary file-based SQLite database for binary export
+                with tempfile.NamedTemporaryFile(delete=False, suffix='.sqlite') as temp_file:
+                    backup_conn = sqlite3.connect(temp_file.name)
+                    with conn:
+                        conn.backup(backup_conn)
+                    backup_conn.commit()
+                    backup_conn.close()
+                    # Read the binary contents of the temporary file
+                    with open(temp_file.name, 'rb') as f:
+                        buf.write(f.read())
+                conn.close()
+                # Clean up the temporary file
+                os.unlink(temp_file.name)
+                buf.seek(0)
+                st.download_button(
+                    "🗄️ SQLite DB",
+                    data=buf.getvalue(),
+                    file_name="preprocessed_data.sqlite",
+                    mime="application/octet-stream",
+                    help="Download the processed dataset as a binary SQLite database file."
+                )
+            except Exception as e:
+                logger.error(f"Failed to export SQLite: {e}")
+                st.error(f"Failed to export SQLite: {e}")
         
         st.caption("Export your processed dataset & pipeline. Use the Dashboard section for detailed data exploration.")
     except Exception as e:
