@@ -14,3 +14,5 @@ regex>=2023.10.3
 dask>=2024.8.2
 dask[distributed]>=2024.8.2
 sqlparse
+SQLite >=3.50.2
+yaml
