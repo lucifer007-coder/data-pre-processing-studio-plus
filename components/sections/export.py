@@ -1,5 +1,3 @@
-# Recommended dependencies: Streamlit >=1.43.2 (for CVE fixes), SQLite >=3.50.2 (for CVE-2025-6965, CVE-2025-29087),
-# Python/pandas/numpy up-to-date (for CVE-2025-4517, CVE-2025-0185), avoid untrusted Dask inputs (CVE-2024-10096).
 import streamlit as st
 import pandas as pd
 import dask.dataframe as dd
@@ -432,3 +430,4 @@ def section_export():
     except Exception as e:
         logger.error(f"Error in export section: {e}")
         st.error(f"Error in export section: {e}")
+
