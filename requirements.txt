@@ -16,3 +16,4 @@ dask[distributed]>=2024.8.2
 sqlparse
 SQLite >=3.50.2
 yaml
+joblib
