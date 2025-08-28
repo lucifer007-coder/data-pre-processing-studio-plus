@@ -199,27 +199,6 @@ def section_export():
                 except Exception as e:
                     logger.error(f"Failed to export YAML pipeline: {e}")
                     st.error(f"Failed to export YAML pipeline: {e}. Ensure pipeline data is valid.")
-        with c3:
-            with st.session_state.session_lock:
-                try:
-                    if not validate_pipeline_steps(st.session_state.pipeline):
-                        raise ValueError("Invalid pipeline format for Scikit-learn Pipeline")
-                    pipeline_obj = Pipeline(st.session_state.pipeline)
-                    buf = io.BytesIO()
-                    joblib.dump(pipeline_obj, buf)
-                    buf.seek(0)
-                    st.download_button(
-                        "📦 Pipeline Object",
-                        data=buf.getvalue(),
-                        file_name="preprocessing_pipeline.pkl",
-                        mime="application/octet-stream",
-                        help="Download the preprocessing pipeline as a Scikit-learn Pipeline object."
-                    )
-                except ImportError:
-                    st.error("Pipeline object export requires scikit-learn and joblib. Install them to enable this feature.")
-                except Exception as e:
-                    logger.error(f"Failed to export Scikit-learn Pipeline: {e}")
-                    st.error(f"Failed to export Scikit-learn Pipeline: {e}. Ensure pipeline is compatible with sklearn.Pipeline.")
 
         # Export Options
         st.header("Export Options")
@@ -430,4 +409,5 @@ def section_export():
     except Exception as e:
         logger.error(f"Error in export section: {e}")
         st.error(f"Error in export section: {e}")
+
 
