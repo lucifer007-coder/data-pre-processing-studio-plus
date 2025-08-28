@@ -873,8 +873,8 @@ def section_feature_engineering():
                 tooltip=['Stage', 'Feature Count']
             ).properties(
                 title='Feature Count Before and After Engineering',
-                width=300,
-                height=200
+                width=500,
+                height=400
             )
             st.altair_chart(chart, use_container_width=True)
             
@@ -937,3 +937,4 @@ def section_feature_engineering():
                                 st.error(msg)
                     else:
                         st.error("Please select at least one column to export.")
+
