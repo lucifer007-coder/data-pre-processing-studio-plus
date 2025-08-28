@@ -19,3 +19,4 @@ duckdb
 dask_ml
 numexpr
 featuretools 
+pkg_resources
