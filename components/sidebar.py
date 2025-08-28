@@ -2,7 +2,7 @@ import streamlit as st
 from session import reset_all, undo_last
 
 def sidebar_navigation() -> str:
-    st.sidebar.title("🧭 Navigation")
+    st.sidebar.title("🧭 negotiation")
     section = st.sidebar.radio(
         "Go to section",
         [
@@ -17,6 +17,7 @@ def sidebar_navigation() -> str:
             "Imbalanced Data",
             "Time-Series Preprocessing",
             "Text Preprocessing",
+            "Feature Engineering",
             "Pipeline & Preview",
             "Dashboard",
             "Export",
