@@ -14,6 +14,7 @@ from components.sections.imbalanced import section_imbalanced
 from components.sections.pipeline_preview import section_pipeline_preview
 from components.sections.time_series import section_time_series
 from components.sections.text import section_text
+from components.sections.feature_engineering import section_feature_engineering
 from components.sections.dashboard import section_dashboard
 from components.sections.export import section_export
 from session import init_session
@@ -53,6 +54,8 @@ def main():
             section_scaling()
         elif section == "Imbalanced Data":
             section_imbalanced()
+        elif section == "Feature Engineering":
+            section_feature_engineering()
         elif section == "Pipeline & Preview":
             section_pipeline_preview()
         elif section == "Time-Series Preprocessing":
