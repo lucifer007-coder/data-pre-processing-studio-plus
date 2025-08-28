@@ -18,3 +18,4 @@ sqlparse>=0.5.3
 duckdb
 dask_ml
 numexpr
+featuretools 
