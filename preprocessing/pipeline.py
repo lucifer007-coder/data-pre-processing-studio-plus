@@ -4,7 +4,6 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from typing import List, Tuple, Dict, Any
-from types import MappingProxyType
 import pandas as pd
 import dask.dataframe as dd
 import streamlit as st
@@ -47,8 +46,8 @@ def validate_step_function(func):
         raise ValueError("Step function must be callable")
     return func
 
-# Step registry with dependency metadata for extensibility - made immutable for security
-STEP_REGISTRY = MappingProxyType({
+# Step registry with dependency metadata for extensibility - using regular dict for mutability
+STEP_REGISTRY = {
     "impute": {"func": validate_step_function(impute_missing), "depends_on": []},
     "drop_missing": {"func": validate_step_function(drop_missing), "depends_on": []},
     "normalize_text": {"func": validate_step_function(normalize_text), "depends_on": []},
@@ -67,7 +66,7 @@ STEP_REGISTRY = MappingProxyType({
     "clean_text": {"func": validate_step_function(clean_text), "depends_on": []},
     "extract_tfidf": {"func": validate_step_function(extract_tfidf), "depends_on": ["clean_text"]},
     "extract_domain": {"func": validate_step_function(extract_domain), "depends_on": []},
-})
+}
 
 def validate_pipeline(df: pd.DataFrame | dd.DataFrame, pipeline: List[Dict[str, Any]]) -> Tuple[bool, List[str]]:
     """
@@ -102,6 +101,11 @@ def validate_pipeline(df: pd.DataFrame | dd.DataFrame, pipeline: List[Dict[str, 
         "clean_text": ["column"],
         "extract_tfidf": ["column", "max_features"],
         "extract_domain": ["column"],
+        "create_polynomial_features": ["columns", "degree"],
+        "extract_datetime_features": ["columns", "features"],
+        "bin_features": ["columns", "bins"],
+        "select_features_correlation": ["threshold"],
+        "automated_feature_engineering": ["max_features"],
     }
 
     for i, step in enumerate(pipeline):
@@ -136,28 +140,32 @@ def validate_pipeline(df: pd.DataFrame | dd.DataFrame, pipeline: List[Dict[str, 
         if kind == "rebalance":
             if params.get("method") not in ["oversample", "undersample"]:
                 errors.append(f"Step {i} ({kind}): Invalid method '{params.get('method')}'.")
+        if kind == "create_polynomial_features":
+            if not isinstance(params.get("degree"), int) or params.get("degree") < 1:
+                errors.append(f"Step {i} ({kind}): 'degree' must be a positive integer.")
+        if kind == "extract_datetime_features":
+            valid_features = ["year", "month", "day", "hour", "minute", "second", "dayofweek", "quarter"]
+            if not all(f in valid_features for f in params.get("features", [])):
+                errors.append(f"Step {i} ({kind}): Invalid datetime features specified.")
+        if kind == "bin_features":
+            if not isinstance(params.get("bins"), int) or params.get("bins") < 2:
+                errors.append(f"Step {i} ({kind}): 'bins' must be an integer >= 2.")
+        if kind == "select_features_correlation":
+            if not isinstance(params.get("threshold"), (int, float)) or not 0.1 <= params.get("threshold") <= 0.9:
+                errors.append(f"Step {i} ({kind}): 'threshold' must be a number between 0.1 and 0.9.")
+        if kind == "automated_feature_engineering":
+            if not isinstance(params.get("max_features"), int) or params.get("max_features") < 10:
+                errors.append(f"Step {i} ({kind}): 'max_features' must be an integer >= 10.")
         
         # Efficient column validation
         if "columns" in params:
             try:
                 missing_cols = [col for col in params.get("columns", []) if col not in df.columns]
                 if missing_cols:
-                    errors.append(f"Step {i} ({kind}): Columns not found: {missing_cols}")
-            except Exception:
-                # Skip column validation for complex Dask operations
-                logger.warning(f"Could not validate columns for step {i} ({kind})")
-
-    # Validate dependency order
-    executed_steps = set()
-    for i, step in enumerate(pipeline):
-        kind = step.get("kind")
-        if kind not in STEP_REGISTRY:
-            continue
-        for dep in STEP_REGISTRY[kind]["depends_on"]:
-            if dep not in executed_steps:
-                errors.append(f"Step {i} ({kind}): Required dependency '{dep}' not executed before this step.")
-        executed_steps.add(kind)
-
+                    errors.append(f"Step {i} ({kind}): Columns not in DataFrame: {', '.join(missing_cols)}")
+            except Exception as e:
+                errors.append(f"Step {i} ({kind}): Error validating columns: {str(e)}")
+    
     return len(errors) == 0, errors
 
 async def apply_step_async(df: pd.DataFrame | dd.DataFrame, step: Dict[str, Any], preview: bool = False, executor: ThreadPoolExecutor = None) -> Tuple[pd.DataFrame | dd.DataFrame, str]:
@@ -237,7 +245,7 @@ async def run_pipeline_async(df: pd.DataFrame | dd.DataFrame, pipeline: List[Dic
         
         messages = []
         
-        # Group steps by dependencies - FIXED LOGIC
+        # Group steps by dependencies
         task_groups = []
         current_group = []
         executed_steps = set()
