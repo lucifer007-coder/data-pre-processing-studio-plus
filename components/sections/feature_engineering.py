@@ -15,6 +15,7 @@ import threading
 import uuid
 import numexpr as ne
 from pandas.api.types import is_numeric_dtype, is_datetime64_any_dtype
+import io
 
 # Placeholder implementations for external utilities
 def dtype_split(df: pd.DataFrame | dd.DataFrame) -> Tuple[List[str], List[str]]:
@@ -441,6 +442,36 @@ def safe_eval_expression(df: pd.DataFrame | dd.DataFrame, expression: str, new_c
     except Exception as e:
         return None, f"Error evaluating expression: {str(e)}"
 
+def export_dataframe(df: pd.DataFrame | dd.DataFrame, columns: List[str]) -> Tuple[bytes, str]:
+    """Export selected columns of the DataFrame as a CSV file."""
+    try:
+        # Validate columns
+        columns = [c for c in columns if c in df.columns]
+        if not columns:
+            return None, "No valid columns selected for export"
+        
+        with st.spinner("Exporting DataFrame..."):
+            if isinstance(df, dd.DataFrame):
+                # Sample or compute for large datasets
+                df_export = df[columns].compute()
+            else:
+                df_export = df[columns]
+            
+            # Use in-memory buffer to generate CSV
+            buffer = io.StringIO()
+            df_export.to_csv(buffer, index=True)
+            buffer.seek(0)
+            return buffer.getvalue().encode('utf-8'), f"Exported {len(columns)} columns as CSV"
+    except ValueError as e:
+        logger.error(f"ValueError in export_dataframe: {str(e)}")
+        return None, f"Error exporting DataFrame: {str(e)}"
+    except MemoryError:
+        logger.error("MemoryError in export_dataframe: Dataset too large")
+        return None, "Error: Dataset too large for export"
+    except Exception as e:
+        logger.error(f"Unexpected error in export_dataframe: {str(e)}")
+        return None, f"Unexpected error: {str(e)}"
+
 def section_feature_engineering():
     """Feature Engineering section with sub-tabs for different operations."""
     if st.session_state.get('df') is None:
@@ -627,3 +658,29 @@ def section_feature_engineering():
                             st.success(f"Added custom feature as {new_col}")
                 else:
                     st.error(msg)
+        
+        st.markdown("**Export Features**")
+        st.markdown("Export the transformed dataset as a CSV file.")
+        export_cols = st.multiselect("Select columns to export", df.columns, default=df.columns.tolist(), key="export_cols")
+        if st.button("Preview Export"):
+            with st.spinner("Generating export preview..."):
+                if export_cols:
+                    preview_df = sample_for_preview(df[export_cols])
+                    st.write("Preview of exported columns:")
+                    st.write(preview_df)
+                    if st.button("Download CSV"):
+                        csv_data, msg = export_dataframe(df, export_cols)
+                        if csv_data:
+                            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                            st.download_button(
+                                label="Download CSV File",
+                                data=csv_data,
+                                file_name=f"exported_features_{timestamp}.csv",
+                                mime="text/csv"
+                            )
+                            st.success(msg)
+                            push_history(f"Exported {len(export_cols)} columns as CSV")
+                        else:
+                            st.error(msg)
+                else:
+                    st.error("Please select at least one column to export.")
