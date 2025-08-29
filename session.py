@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import dask.dataframe as dd
+import threading
 
 def init_session():
     """Initialize session state with default values."""
@@ -24,6 +25,9 @@ def init_session():
         st.session_state.section = "Upload"
     if 'just_imported_bundle' not in st.session_state:
         st.session_state.just_imported_bundle = False
+    # Initialize session lock for thread safety
+    if 'session_lock' not in st.session_state:
+        st.session_state.session_lock = threading.Lock()
 
 def reset_all():
     """Reset all session state."""
@@ -37,6 +41,8 @@ def reset_all():
     st.session_state.semantic_map = {}
     st.session_state.section = "Upload"
     st.session_state.just_imported_bundle = False
+    # Reinitialize session lock after reset
+    st.session_state.session_lock = threading.Lock()
 
 def undo_last():
     """Undo the last applied step."""
