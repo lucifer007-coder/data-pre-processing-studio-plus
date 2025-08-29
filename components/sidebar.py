@@ -2,7 +2,7 @@ import streamlit as st
 from session import reset_all, undo_last
 
 def sidebar_navigation() -> str:
-    st.sidebar.title("🧭 negotiation")
+    st.sidebar.title("🧭 Navigation")
     section = st.sidebar.radio(
         "Go to section",
         [
