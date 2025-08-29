@@ -2,19 +2,26 @@ import streamlit as st
 import pandas as pd
 import dask.dataframe as dd
 import numpy as np
-from sklearn.preprocessing import PolynomialFeatures
+from sklearn.preprocessing import PolynomialFeatures, StandardScaler, LabelEncoder
+from sklearn.feature_selection import SelectKBest, mutual_info_regression, mutual_info_classif, f_regression, f_classif
+from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
+from sklearn.model_selection import cross_val_score
 from dask_ml.preprocessing import PolynomialFeatures as DaskPolynomialFeatures
-from sklearn.feature_selection import SelectKBest, mutual_info_regression
 from pandas.api.types import is_numeric_dtype, is_datetime64_any_dtype, is_string_dtype
 import altair as alt
 import logging
 from typing import List, Tuple, Dict, Any, Optional, Union
-from datetime import datetime
+from datetime import datetime, timedelta
 import threading
 import uuid
 import numexpr as ne
 import io
 import warnings
+from scipy import stats
+from sklearn.decomposition import PCA
+from sklearn.cluster import KMeans
+import re
+from collections import Counter
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -22,6 +29,25 @@ logger = logging.getLogger(__name__)
 
 # Suppress warnings for cleaner output
 warnings.filterwarnings('ignore', category=FutureWarning)
+
+# Enhanced feature engineering configuration
+FEATURE_CONFIG = {
+    'max_polynomial_degree': 3,
+    'max_interaction_features': 20,
+    'min_variance_threshold': 1e-6,
+    'correlation_threshold': 0.95,
+    'mutual_info_threshold': 0.01,
+    'max_categorical_cardinality': 50,
+    'text_feature_min_length': 3,
+    'datetime_feature_combinations': True,
+    'enable_clustering_features': True,
+    'enable_pca_features': True,
+    'enable_statistical_features': True,
+    'enable_domain_features': True
+}
+
+# Thread lock for session state updates
+session_lock = threading.Lock()
 
 # Placeholder implementations for external utilities
 def dtype_split(df: Union[pd.DataFrame, dd.DataFrame]) -> Tuple[List[str], List[str]]:
@@ -129,9 +155,6 @@ def validate_step_function(func):
     """Validate a step function (placeholder)."""
     return func
 
-# Thread lock for session state updates
-session_lock = threading.Lock()
-
 # Local feature engineering step registry
 FEATURE_STEP_REGISTRY = {
     "create_polynomial_features": {
@@ -155,6 +178,797 @@ FEATURE_STEP_REGISTRY = {
         "depends_on": []
     }
 }
+
+def analyze_dataset_advanced(df: Union[pd.DataFrame, dd.DataFrame], target_col: Optional[str] = None, sample_size: int = 10000) -> Dict[str, Any]:
+    """Advanced dataset analysis with feature importance and statistical insights."""
+    try:
+        if df is None or df.empty:
+            return {}
+            
+        # Sample for analysis if dataset is large
+        if isinstance(df, dd.DataFrame):
+            total_rows = len(df)
+            if hasattr(total_rows, 'compute'):
+                total_rows = total_rows.compute()
+            if total_rows > sample_size:
+                df_sample = sample_for_preview(df, n=sample_size)
+            else:
+                df_sample = df.compute()
+        else:
+            if len(df) > sample_size:
+                df_sample = sample_for_preview(df, n=sample_size)
+            else:
+                df_sample = df
+        
+        if df_sample.empty:
+            return {}
+        
+        analysis = {
+            'numeric_cols': [],
+            'categorical_cols': [],
+            'datetime_cols': [],
+            'text_cols': [],
+            'binary_cols': [],
+            'high_cardinality_cols': [],
+            'stats': {},
+            'feature_importance': {},
+            'data_quality': {},
+            'patterns': {}
+        }
+        
+        total_rows = len(df_sample)
+        
+        for col in df.columns:
+            try:
+                # Basic statistics
+                unique_count = df_sample[col].nunique()
+                missing_count = df_sample[col].isna().sum()
+                missing_rate = missing_count / max(total_rows, 1)
+                
+                analysis['stats'][col] = {
+                    'unique_count': unique_count,
+                    'missing_rate': missing_rate,
+                    'variance': None,
+                    'skewness': None,
+                    'kurtosis': None,
+                    'type': None,
+                    'cardinality_ratio': unique_count / max(total_rows, 1)
+                }
+                
+                # Data quality assessment
+                analysis['data_quality'][col] = {
+                    'completeness': 1 - missing_rate,
+                    'uniqueness': unique_count / max(total_rows, 1),
+                    'consistency': 1.0  # Placeholder for consistency checks
+                }
+                
+                # Determine column type with enhanced logic
+                if is_numeric_dtype(df_sample[col]):
+                    analysis['numeric_cols'].append(col)
+                    analysis['stats'][col]['type'] = 'numeric'
+                    
+                    # Calculate statistical measures
+                    try:
+                        col_data = df_sample[col].dropna()
+                        if len(col_data) > 1:
+                            analysis['stats'][col]['variance'] = col_data.var()
+                            analysis['stats'][col]['skewness'] = stats.skew(col_data)
+                            analysis['stats'][col]['kurtosis'] = stats.kurtosis(col_data)
+                            
+                            # Check if binary numeric
+                            if unique_count == 2:
+                                analysis['binary_cols'].append(col)
+                    except Exception:
+                        pass
+                        
+                elif is_datetime64_any_dtype(df_sample[col]):
+                    analysis['datetime_cols'].append(col)
+                    analysis['stats'][col]['type'] = 'datetime'
+                    
+                    # Analyze datetime patterns
+                    try:
+                        dt_data = df_sample[col].dropna()
+                        if len(dt_data) > 1:
+                            date_range = dt_data.max() - dt_data.min()
+                            analysis['patterns'][col] = {
+                                'date_range_days': date_range.days if hasattr(date_range, 'days') else None,
+                                'has_time_component': dt_data.dt.hour.nunique() > 1,
+                                'frequency_pattern': 'irregular'  # Could be enhanced with frequency detection
+                            }
+                    except Exception:
+                        pass
+                        
+                elif is_string_dtype(df_sample[col]) or df_sample[col].dtype == 'object':
+                    # Enhanced text/categorical classification
+                    unique_ratio = unique_count / max(total_rows, 1)
+                    avg_length = df_sample[col].astype(str).str.len().mean()
+                    
+                    if unique_count > FEATURE_CONFIG['max_categorical_cardinality']:
+                        analysis['high_cardinality_cols'].append(col)
+                    
+                    if unique_ratio > 0.8 or avg_length > 20:  # Likely text
+                        analysis['text_cols'].append(col)
+                        analysis['stats'][col]['type'] = 'text'
+                        
+                        # Text analysis
+                        analysis['patterns'][col] = {
+                            'avg_length': avg_length,
+                            'has_numbers': df_sample[col].astype(str).str.contains(r'\d').any(),
+                            'has_special_chars': df_sample[col].astype(str).str.contains(r'[^a-zA-Z0-9\s]').any(),
+                            'word_count_avg': df_sample[col].astype(str).str.split().str.len().mean()
+                        }
+                    else:  # Categorical
+                        analysis['categorical_cols'].append(col)
+                        analysis['stats'][col]['type'] = 'categorical'
+                        
+                        # Check if binary categorical
+                        if unique_count == 2:
+                            analysis['binary_cols'].append(col)
+                else:
+                    analysis['categorical_cols'].append(col)
+                    analysis['stats'][col]['type'] = 'other'
+                    
+            except Exception as e:
+                logger.warning(f"Error analyzing column {col}: {str(e)}")
+                continue
+        
+        # Feature importance analysis if target is provided
+        if target_col and target_col in df_sample.columns:
+            try:
+                analysis['feature_importance'] = calculate_feature_importance(
+                    df_sample, target_col, analysis
+                )
+            except Exception as e:
+                logger.warning(f"Error calculating feature importance: {str(e)}")
+        
+        # Correlation analysis for numeric columns
+        if len(analysis['numeric_cols']) > 1:
+            try:
+                numeric_df = df_sample[analysis['numeric_cols']].select_dtypes(include=[np.number])
+                if not numeric_df.empty:
+                    corr_matrix = numeric_df.corr()
+                    analysis['correlations'] = corr_matrix.abs()
+                    
+                    # Find highly correlated pairs
+                    high_corr_pairs = []
+                    for i in range(len(corr_matrix.columns)):
+                        for j in range(i+1, len(corr_matrix.columns)):
+                            corr_val = abs(corr_matrix.iloc[i, j])
+                            if corr_val > 0.7:
+                                high_corr_pairs.append({
+                                    'feature1': corr_matrix.columns[i],
+                                    'feature2': corr_matrix.columns[j],
+                                    'correlation': corr_val
+                                })
+                    analysis['high_correlations'] = high_corr_pairs
+            except Exception as e:
+                logger.warning(f"Error computing correlations: {str(e)}")
+        
+        return analysis
+        
+    except Exception as e:
+        logger.error(f"Error in analyze_dataset_advanced: {str(e)}")
+        return {}
+
+def calculate_feature_importance(df: pd.DataFrame, target_col: str, analysis: Dict) -> Dict[str, float]:
+    """Calculate feature importance using multiple methods."""
+    try:
+        if target_col not in df.columns:
+            return {}
+        
+        target = df[target_col].dropna()
+        if len(target) == 0:
+            return {}
+        
+        # Determine if regression or classification
+        is_classification = (
+            target_col in analysis['categorical_cols'] or 
+            target_col in analysis['binary_cols'] or
+            target.nunique() < 20
+        )
+        
+        importance_scores = {}
+        
+        # Prepare features
+        numeric_features = [col for col in analysis['numeric_cols'] if col != target_col]
+        
+        if numeric_features:
+            X = df[numeric_features].fillna(df[numeric_features].median())
+            y = target
+            
+            # Align X and y indices
+            common_idx = X.index.intersection(y.index)
+            X = X.loc[common_idx]
+            y = y.loc[common_idx]
+            
+            if len(X) > 10:  # Minimum samples for meaningful analysis
+                try:
+                    # Mutual information
+                    if is_classification:
+                        mi_scores = mutual_info_classif(X, y, random_state=42)
+                    else:
+                        mi_scores = mutual_info_regression(X, y, random_state=42)
+                    
+                    for i, col in enumerate(numeric_features):
+                        importance_scores[col] = {
+                            'mutual_info': mi_scores[i],
+                            'type': 'mutual_info'
+                        }
+                except Exception as e:
+                    logger.warning(f"Error calculating mutual information: {str(e)}")
+                
+                try:
+                    # Statistical tests
+                    if is_classification:
+                        f_scores, _ = f_classif(X, y)
+                    else:
+                        f_scores, _ = f_regression(X, y)
+                    
+                    for i, col in enumerate(numeric_features):
+                        if col not in importance_scores:
+                            importance_scores[col] = {}
+                        importance_scores[col]['f_score'] = f_scores[i]
+                except Exception as e:
+                    logger.warning(f"Error calculating F-scores: {str(e)}")
+                
+                try:
+                    # Random Forest importance
+                    if is_classification:
+                        rf = RandomForestClassifier(n_estimators=50, random_state=42, max_depth=5)
+                    else:
+                        rf = RandomForestRegressor(n_estimators=50, random_state=42, max_depth=5)
+                    
+                    rf.fit(X, y)
+                    rf_importance = rf.feature_importances_
+                    
+                    for i, col in enumerate(numeric_features):
+                        if col not in importance_scores:
+                            importance_scores[col] = {}
+                        importance_scores[col]['rf_importance'] = rf_importance[i]
+                except Exception as e:
+                    logger.warning(f"Error calculating RF importance: {str(e)}")
+        
+        return importance_scores
+        
+    except Exception as e:
+        logger.error(f"Error in calculate_feature_importance: {str(e)}")
+        return {}
+
+def create_advanced_numeric_features(df: Union[pd.DataFrame, dd.DataFrame], analysis: Dict, max_features: int = 20) -> Tuple[Union[pd.DataFrame, dd.DataFrame], List[str]]:
+    """Create advanced numeric features including statistical and mathematical transformations."""
+    try:
+        df_out = df.copy()
+        new_features = []
+        feature_count = 0
+        
+        numeric_cols = analysis['numeric_cols']
+        high_var_cols = [
+            col for col in numeric_cols 
+            if col in analysis['stats'] and 
+            analysis['stats'][col]['variance'] is not None and 
+            analysis['stats'][col]['variance'] > FEATURE_CONFIG['min_variance_threshold']
+        ]
+        
+        # 1. Mathematical transformations
+        for col in high_var_cols[:min(5, len(high_var_cols))]:
+            if feature_count >= max_features:
+                break
+            
+            try:
+                col_data = df_out[col]
+                
+                # Log transformation (for positive skewed data)
+                if analysis['stats'][col].get('skewness', 0) > 1:
+                    new_col = f"log_{col}"
+                    if isinstance(df_out, dd.DataFrame):
+                        df_out[new_col] = col_data.map_partitions(
+                            lambda s: np.log1p(np.maximum(s, 0)), 
+                            meta=(new_col, 'float64')
+                        )
+                    else:
+                        df_out[new_col] = np.log1p(np.maximum(col_data, 0))
+                    new_features.append(new_col)
+                    feature_count += 1
+                
+                # Square root for moderate skewness
+                if 0.5 < analysis['stats'][col].get('skewness', 0) <= 1 and feature_count < max_features:
+                    new_col = f"sqrt_{col}"
+                    if isinstance(df_out, dd.DataFrame):
+                        df_out[new_col] = col_data.map_partitions(
+                            lambda s: np.sqrt(np.maximum(s, 0)), 
+                            meta=(new_col, 'float64')
+                        )
+                    else:
+                        df_out[new_col] = np.sqrt(np.maximum(col_data, 0))
+                    new_features.append(new_col)
+                    feature_count += 1
+                
+                # Reciprocal transformation
+                if feature_count < max_features:
+                    new_col = f"reciprocal_{col}"
+                    if isinstance(df_out, dd.DataFrame):
+                        df_out[new_col] = col_data.map_partitions(
+                            lambda s: 1 / (s + 1e-8), 
+                            meta=(new_col, 'float64')
+                        )
+                    else:
+                        df_out[new_col] = 1 / (col_data + 1e-8)
+                    new_features.append(new_col)
+                    feature_count += 1
+                    
+            except Exception as e:
+                logger.warning(f"Error creating transformations for {col}: {str(e)}")
+        
+        # 2. Statistical features (rolling windows for time series-like data)
+        if len(high_var_cols) >= 2 and feature_count < max_features:
+            try:
+                # Create statistical aggregations
+                for col in high_var_cols[:3]:
+                    if feature_count >= max_features:
+                        break
+                    
+                    # Z-score (standardized values)
+                    new_col = f"zscore_{col}"
+                    if isinstance(df_out, dd.DataFrame):
+                        col_mean = df_out[col].mean().compute()
+                        col_std = df_out[col].std().compute()
+                        df_out[new_col] = (df_out[col] - col_mean) / (col_std + 1e-8)
+                    else:
+                        col_mean = df_out[col].mean()
+                        col_std = df_out[col].std()
+                        df_out[new_col] = (df_out[col] - col_mean) / (col_std + 1e-8)
+                    new_features.append(new_col)
+                    feature_count += 1
+                    
+            except Exception as e:
+                logger.warning(f"Error creating statistical features: {str(e)}")
+        
+        # 3. Interaction features based on correlation
+        if 'correlations' in analysis and feature_count < max_features:
+            try:
+                corr_matrix = analysis['correlations']
+                interaction_count = 0
+                
+                for i, col1 in enumerate(high_var_cols):
+                    if feature_count >= max_features or interaction_count >= FEATURE_CONFIG['max_interaction_features']:
+                        break
+                    for col2 in high_var_cols[i+1:]:
+                        if feature_count >= max_features or interaction_count >= FEATURE_CONFIG['max_interaction_features']:
+                            break
+                        
+                        if col1 in corr_matrix.index and col2 in corr_matrix.columns:
+                            corr_val = corr_matrix.loc[col1, col2]
+                            if 0.3 <= corr_val <= 0.8:  # Moderate correlation
+                                # Multiplication
+                                new_col = f"{col1}_x_{col2}"
+                                df_out[new_col] = df_out[col1] * df_out[col2]
+                                new_features.append(new_col)
+                                feature_count += 1
+                                interaction_count += 1
+                                
+                                # Division (if denominator is not zero)
+                                if feature_count < max_features:
+                                    new_col = f"{col1}_div_{col2}"
+                                    if isinstance(df_out, dd.DataFrame):
+                                        df_out[new_col] = df_out[col1] / (df_out[col2] + 1e-8)
+                                    else:
+                                        df_out[new_col] = df_out[col1] / (df_out[col2] + 1e-8)
+                                    new_features.append(new_col)
+                                    feature_count += 1
+                                    interaction_count += 1
+                                    
+            except Exception as e:
+                logger.warning(f"Error creating interaction features: {str(e)}")
+        
+        return df_out, new_features
+        
+    except Exception as e:
+        logger.error(f"Error in create_advanced_numeric_features: {str(e)}")
+        return df, []
+
+def create_advanced_categorical_features(df: Union[pd.DataFrame, dd.DataFrame], analysis: Dict, max_features: int = 15) -> Tuple[Union[pd.DataFrame, dd.DataFrame], List[str]]:
+    """Create advanced categorical features including encoding and aggregations."""
+    try:
+        df_out = df.copy()
+        new_features = []
+        feature_count = 0
+        
+        categorical_cols = [
+            col for col in analysis['categorical_cols'] 
+            if col not in analysis['high_cardinality_cols']
+        ]
+        
+        for col in categorical_cols[:min(5, len(categorical_cols))]:
+            if feature_count >= max_features:
+                break
+            
+            try:
+                # 1. Frequency encoding
+                new_col = f"freq_{col}"
+                if isinstance(df_out, dd.DataFrame):
+                    freq_map = df_out[col].value_counts().compute().to_dict()
+                    df_out[new_col] = df_out[col].map(freq_map, meta=(new_col, 'int64'))
+                else:
+                    freq_map = df_out[col].value_counts().to_dict()
+                    df_out[new_col] = df_out[col].map(freq_map)
+                new_features.append(new_col)
+                feature_count += 1
+                
+                # 2. Rank encoding
+                if feature_count < max_features:
+                    new_col = f"rank_{col}"
+                    if isinstance(df_out, dd.DataFrame):
+                        rank_map = df_out[col].value_counts().compute().rank(ascending=False).to_dict()
+                        df_out[new_col] = df_out[col].map(rank_map, meta=(new_col, 'float64'))
+                    else:
+                        rank_map = df_out[col].value_counts().rank(ascending=False).to_dict()
+                        df_out[new_col] = df_out[col].map(rank_map)
+                    new_features.append(new_col)
+                    feature_count += 1
+                
+                # 3. Binary encoding for categories with moderate cardinality
+                unique_count = analysis['stats'][col]['unique_count']
+                if 3 <= unique_count <= 10 and feature_count < max_features:
+                    # Create binary features for top categories
+                    if isinstance(df_out, dd.DataFrame):
+                        top_categories = df_out[col].value_counts().compute().head(3).index
+                    else:
+                        top_categories = df_out[col].value_counts().head(3).index
+                    
+                    for category in top_categories:
+                        if feature_count >= max_features:
+                            break
+                        new_col = f"is_{col}_{str(category)[:10]}"  # Limit name length
+                        df_out[new_col] = (df_out[col] == category).astype(int)
+                        new_features.append(new_col)
+                        feature_count += 1
+                        
+            except Exception as e:
+                logger.warning(f"Error creating categorical features for {col}: {str(e)}")
+        
+        return df_out, new_features
+        
+    except Exception as e:
+        logger.error(f"Error in create_advanced_categorical_features: {str(e)}")
+        return df, []
+
+def create_advanced_datetime_features(df: Union[pd.DataFrame, dd.DataFrame], analysis: Dict, max_features: int = 20) -> Tuple[Union[pd.DataFrame, dd.DataFrame], List[str]]:
+    """Create comprehensive datetime features including cyclical and business features."""
+    try:
+        df_out = df.copy()
+        new_features = []
+        feature_count = 0
+        
+        datetime_cols = analysis['datetime_cols']
+        
+        for col in datetime_cols[:min(3, len(datetime_cols))]:
+            if feature_count >= max_features:
+                break
+            
+            try:
+                # Ensure datetime type
+                if not is_datetime64_any_dtype(df_out[col]):
+                    if isinstance(df_out, dd.DataFrame):
+                        df_out[col] = dd.to_datetime(df_out[col], errors='coerce')
+                    else:
+                        df_out[col] = pd.to_datetime(df_out[col], errors='coerce')
+                
+                # Basic datetime features
+                basic_features = ["year", "month", "day", "dayofweek", "hour", "quarter"]
+                for feature in basic_features:
+                    if feature_count >= max_features:
+                        break
+                    try:
+                        new_col = f"{col}_{feature}"
+                        if isinstance(df_out, dd.DataFrame):
+                            df_out[new_col] = getattr(df_out[col].dt, feature)
+                        else:
+                            df_out[new_col] = getattr(df_out[col].dt, feature)
+                        new_features.append(new_col)
+                        feature_count += 1
+                    except AttributeError:
+                        continue
+                
+                # Advanced datetime features
+                if feature_count < max_features:
+                    # Is weekend
+                    new_col = f"{col}_is_weekend"
+                    if isinstance(df_out, dd.DataFrame):
+                        df_out[new_col] = (df_out[col].dt.dayofweek >= 5).astype(int)
+                    else:
+                        df_out[new_col] = (df_out[col].dt.dayofweek >= 5).astype(int)
+                    new_features.append(new_col)
+                    feature_count += 1
+                
+                if feature_count < max_features:
+                    # Is month end
+                    new_col = f"{col}_is_month_end"
+                    if isinstance(df_out, dd.DataFrame):
+                        df_out[new_col] = df_out[col].dt.is_month_end.astype(int)
+                    else:
+                        df_out[new_col] = df_out[col].dt.is_month_end.astype(int)
+                    new_features.append(new_col)
+                    feature_count += 1
+                
+                # Cyclical features (sin/cos encoding)
+                if feature_count < max_features - 1:
+                    # Month cyclical
+                    new_col_sin = f"{col}_month_sin"
+                    new_col_cos = f"{col}_month_cos"
+                    if isinstance(df_out, dd.DataFrame):
+                        df_out[new_col_sin] = df_out[col].dt.month.map_partitions(
+                            lambda s: np.sin(2 * np.pi * s / 12), 
+                            meta=(new_col_sin, 'float64')
+                        )
+                        df_out[new_col_cos] = df_out[col].dt.month.map_partitions(
+                            lambda s: np.cos(2 * np.pi * s / 12), 
+                            meta=(new_col_cos, 'float64')
+                        )
+                    else:
+                        df_out[new_col_sin] = np.sin(2 * np.pi * df_out[col].dt.month / 12)
+                        df_out[new_col_cos] = np.cos(2 * np.pi * df_out[col].dt.month / 12)
+                    new_features.extend([new_col_sin, new_col_cos])
+                    feature_count += 2
+                
+                # Time since epoch (for trend analysis)
+                if feature_count < max_features:
+                    new_col = f"{col}_timestamp"
+                    if isinstance(df_out, dd.DataFrame):
+                        df_out[new_col] = df_out[col].map_partitions(
+                            lambda s: s.astype('int64') // 10**9, 
+                            meta=(new_col, 'int64')
+                        )
+                    else:
+                        df_out[new_col] = df_out[col].astype('int64') // 10**9
+                    new_features.append(new_col)
+                    feature_count += 1
+                    
+            except Exception as e:
+                logger.warning(f"Error creating datetime features for {col}: {str(e)}")
+        
+        return df_out, new_features
+        
+    except Exception as e:
+        logger.error(f"Error in create_advanced_datetime_features: {str(e)}")
+        return df, []
+
+def create_advanced_text_features(df: Union[pd.DataFrame, dd.DataFrame], analysis: Dict, max_features: int = 10) -> Tuple[Union[pd.DataFrame, dd.DataFrame], List[str]]:
+    """Create advanced text features including NLP-inspired features."""
+    try:
+        df_out = df.copy()
+        new_features = []
+        feature_count = 0
+        
+        text_cols = analysis['text_cols'][:min(2, len(analysis['text_cols']))]
+        
+        for col in text_cols:
+            if feature_count >= max_features:
+                break
+            
+            try:
+                # Basic text features
+                new_col = f"len_{col}"
+                if isinstance(df_out, dd.DataFrame):
+                    df_out[new_col] = df_out[col].map_partitions(
+                        lambda s: s.astype(str).str.len(), 
+                        meta=(new_col, 'int64')
+                    )
+                else:
+                    df_out[new_col] = df_out[col].astype(str).str.len()
+                new_features.append(new_col)
+                feature_count += 1
+                
+                # Word count
+                if feature_count < max_features:
+                    new_col = f"word_count_{col}"
+                    if isinstance(df_out, dd.DataFrame):
+                        df_out[new_col] = df_out[col].map_partitions(
+                            lambda s: s.astype(str).str.split().str.len(), 
+                            meta=(new_col, 'int64')
+                        )
+                    else:
+                        df_out[new_col] = df_out[col].astype(str).str.split().str.len()
+                    new_features.append(new_col)
+                    feature_count += 1
+                
+                # Number of digits
+                if feature_count < max_features:
+                    new_col = f"digit_count_{col}"
+                    if isinstance(df_out, dd.DataFrame):
+                        df_out[new_col] = df_out[col].map_partitions(
+                            lambda s: s.astype(str).str.count(r'\d'), 
+                            meta=(new_col, 'int64')
+                        )
+                    else:
+                        df_out[new_col] = df_out[col].astype(str).str.count(r'\d')
+                    new_features.append(new_col)
+                    feature_count += 1
+                
+                # Number of special characters
+                if feature_count < max_features:
+                    new_col = f"special_char_count_{col}"
+                    if isinstance(df_out, dd.DataFrame):
+                        df_out[new_col] = df_out[col].map_partitions(
+                            lambda s: s.astype(str).str.count(r'[^a-zA-Z0-9\s]'), 
+                            meta=(new_col, 'int64')
+                        )
+                    else:
+                        df_out[new_col] = df_out[col].astype(str).str.count(r'[^a-zA-Z0-9\s]')
+                    new_features.append(new_col)
+                    feature_count += 1
+                
+                # Average word length
+                if feature_count < max_features:
+                    new_col = f"avg_word_len_{col}"
+                    if isinstance(df_out, dd.DataFrame):
+                        df_out[new_col] = df_out[col].map_partitions(
+                            lambda s: s.astype(str).str.split().apply(
+                                lambda words: np.mean([len(w) for w in words]) if words else 0
+                            ), 
+                            meta=(new_col, 'float64')
+                        )
+                    else:
+                        df_out[new_col] = df_out[col].astype(str).str.split().apply(
+                            lambda words: np.mean([len(w) for w in words]) if words else 0
+                        )
+                    new_features.append(new_col)
+                    feature_count += 1
+                    
+            except Exception as e:
+                logger.warning(f"Error creating text features for {col}: {str(e)}")
+        
+        return df_out, new_features
+        
+    except Exception as e:
+        logger.error(f"Error in create_advanced_text_features: {str(e)}")
+        return df, []
+
+def create_clustering_features(df: Union[pd.DataFrame, dd.DataFrame], analysis: Dict, max_features: int = 5) -> Tuple[Union[pd.DataFrame, dd.DataFrame], List[str]]:
+    """Create clustering-based features for unsupervised pattern discovery."""
+    try:
+        if not FEATURE_CONFIG['enable_clustering_features']:
+            return df, []
+        
+        df_out = df.copy()
+        new_features = []
+        
+        numeric_cols = [
+            col for col in analysis['numeric_cols'] 
+            if col in analysis['stats'] and 
+            analysis['stats'][col]['variance'] is not None and 
+            analysis['stats'][col]['variance'] > FEATURE_CONFIG['min_variance_threshold']
+        ]
+        
+        if len(numeric_cols) < 2:
+            return df, []
+        
+        # Sample data for clustering if too large
+        if isinstance(df_out, dd.DataFrame):
+            df_sample = sample_for_preview(df_out[numeric_cols], n=10000)
+        else:
+            df_sample = df_out[numeric_cols] if len(df_out) <= 10000 else sample_for_preview(df_out[numeric_cols], n=10000)
+        
+        if df_sample.empty:
+            return df, []
+        
+        # Fill missing values
+        df_sample_filled = df_sample.fillna(df_sample.median())
+        
+        # Standardize features
+        scaler = StandardScaler()
+        X_scaled = scaler.fit_transform(df_sample_filled)
+        
+        # K-means clustering
+        n_clusters = min(5, max(2, len(df_sample) // 1000))  # Adaptive number of clusters
+        kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
+        cluster_labels = kmeans.fit_predict(X_scaled)
+        
+        # Create cluster feature
+        new_col = "cluster_kmeans"
+        if isinstance(df_out, dd.DataFrame):
+            # For Dask, we need to apply clustering to the full dataset
+            df_full_filled = df_out[numeric_cols].fillna(df_out[numeric_cols].median())
+            X_full_scaled = df_full_filled.map_partitions(
+                lambda x: pd.DataFrame(scaler.transform(x), index=x.index, columns=x.columns),
+                meta=df_full_filled
+            )
+            # Apply clustering (this is approximate for Dask)
+            df_out[new_col] = X_full_scaled.map_partitions(
+                lambda x: pd.Series(kmeans.predict(x), index=x.index),
+                meta=(new_col, 'int64')
+            )
+        else:
+            df_full_filled = df_out[numeric_cols].fillna(df_out[numeric_cols].median())
+            X_full_scaled = scaler.transform(df_full_filled)
+            df_out[new_col] = kmeans.predict(X_full_scaled)
+        
+        new_features.append(new_col)
+        
+        # Distance to cluster centers
+        if len(new_features) < max_features:
+            new_col = "cluster_distance"
+            if isinstance(df_out, dd.DataFrame):
+                # Simplified distance calculation for Dask
+                df_out[new_col] = X_full_scaled.map_partitions(
+                    lambda x: pd.Series([np.min(np.linalg.norm(x.values - kmeans.cluster_centers_, axis=1)) for _ in range(len(x))], index=x.index),
+                    meta=(new_col, 'float64')
+                )
+            else:
+                distances = np.array([np.min(np.linalg.norm(X_full_scaled - kmeans.cluster_centers_, axis=1))])
+                df_out[new_col] = np.min(np.linalg.norm(X_full_scaled[:, np.newaxis] - kmeans.cluster_centers_.T[np.newaxis, :], axis=2), axis=1)
+            new_features.append(new_col)
+        
+        return df_out, new_features
+        
+    except Exception as e:
+        logger.warning(f"Error creating clustering features: {str(e)}")
+        return df, []
+
+def create_pca_features(df: Union[pd.DataFrame, dd.DataFrame], analysis: Dict, max_features: int = 5) -> Tuple[Union[pd.DataFrame, dd.DataFrame], List[str]]:
+    """Create PCA-based features for dimensionality reduction insights."""
+    try:
+        if not FEATURE_CONFIG['enable_pca_features']:
+            return df, []
+        
+        df_out = df.copy()
+        new_features = []
+        
+        numeric_cols = [
+            col for col in analysis['numeric_cols'] 
+            if col in analysis['stats'] and 
+            analysis['stats'][col]['variance'] is not None and 
+            analysis['stats'][col]['variance'] > FEATURE_CONFIG['min_variance_threshold']
+        ]
+        
+        if len(numeric_cols) < 3:  # Need at least 3 features for meaningful PCA
+            return df, []
+        
+        # Sample data for PCA if too large
+        if isinstance(df_out, dd.DataFrame):
+            df_sample = sample_for_preview(df_out[numeric_cols], n=10000)
+        else:
+            df_sample = df_out[numeric_cols] if len(df_out) <= 10000 else sample_for_preview(df_out[numeric_cols], n=10000)
+        
+        if df_sample.empty:
+            return df, []
+        
+        # Fill missing values and standardize
+        df_sample_filled = df_sample.fillna(df_sample.median())
+        scaler = StandardScaler()
+        X_scaled = scaler.fit_transform(df_sample_filled)
+        
+        # Apply PCA
+        n_components = min(max_features, len(numeric_cols), 5)
+        pca = PCA(n_components=n_components, random_state=42)
+        X_pca = pca.fit_transform(X_scaled)
+        
+        # Create PCA features
+        for i in range(n_components):
+            new_col = f"pca_component_{i+1}"
+            if isinstance(df_out, dd.DataFrame):
+                # Apply PCA transformation to full dataset
+                df_full_filled = df_out[numeric_cols].fillna(df_out[numeric_cols].median())
+                X_full_scaled = df_full_filled.map_partitions(
+                    lambda x: pd.DataFrame(scaler.transform(x), index=x.index, columns=x.columns),
+                    meta=df_full_filled
+                )
+                df_out[new_col] = X_full_scaled.map_partitions(
+                    lambda x: pd.Series(pca.transform(x)[:, i], index=x.index),
+                    meta=(new_col, 'float64')
+                )
+            else:
+                df_full_filled = df_out[numeric_cols].fillna(df_out[numeric_cols].median())
+                X_full_scaled = scaler.transform(df_full_filled)
+                X_full_pca = pca.transform(X_full_scaled)
+                df_out[new_col] = X_full_pca[:, i]
+            
+            new_features.append(new_col)
+        
+        return df_out, new_features
+        
+    except Exception as e:
+        logger.warning(f"Error creating PCA features: {str(e)}")
+        return df, []
 
 def create_polynomial_features(df: Union[pd.DataFrame, dd.DataFrame], columns: List[str], degree: int = 2, preview: bool = False) -> Tuple[Union[pd.DataFrame, dd.DataFrame], str]:
     """Create polynomial and interaction features for specified numeric columns."""
@@ -621,7 +1435,7 @@ def analyze_dataset(df: Union[pd.DataFrame, dd.DataFrame], sample_size: int = 10
         return {}
 
 def automated_feature_engineering(df: Union[pd.DataFrame, dd.DataFrame], max_features: int = 50, preview: bool = False, target_col: Optional[str] = None) -> Tuple[Union[pd.DataFrame, dd.DataFrame], str]:
-    """Generate high-quality features based on dataset analysis."""
+    """Enhanced automated feature engineering with advanced techniques and intelligent feature selection."""
     try:
         if not isinstance(df, (pd.DataFrame, dd.DataFrame)):
             return df, "Invalid DataFrame input"
@@ -630,7 +1444,7 @@ def automated_feature_engineering(df: Union[pd.DataFrame, dd.DataFrame], max_fea
             return df, "DataFrame is empty"
             
         # Validate parameters
-        max_features = max(5, min(200, int(max_features)))
+        max_features = max(5, min(500, int(max_features)))
         
         # Check for duplicate columns
         if len(set(df.columns)) != len(df.columns):
@@ -638,205 +1452,174 @@ def automated_feature_engineering(df: Union[pd.DataFrame, dd.DataFrame], max_fea
         
         df_out = df if preview else df.copy()
         
-        with st.spinner(f"Analyzing dataset and generating up to {max_features} features..."):
-            # Analyze dataset
-            analysis = analyze_dataset(df_out)
+        with st.spinner(f"🔍 Analyzing dataset and generating up to {max_features} intelligent features..."):
+            # Advanced dataset analysis
+            analysis = analyze_dataset_advanced(df_out, target_col)
             if not analysis:
                 return df, "Error analyzing dataset"
             
-            new_features = []
-            feature_count = 0
+            all_new_features = []
+            feature_budget = max_features
             
-            # 1. Numeric feature engineering
-            numeric_cols = analysis['numeric_cols']
-            if numeric_cols and feature_count < max_features:
-                # Filter high variance columns
-                high_var_cols = []
-                for col in numeric_cols:
-                    if col in analysis['stats'] and analysis['stats'][col]['variance'] is not None:
-                        if analysis['stats'][col]['variance'] > 1e-6:  # Not constant
-                            high_var_cols.append(col)
-                
-                # Create interaction features for correlated pairs
-                if 'correlations' in analysis and len(high_var_cols) >= 2:
-                    corr_matrix = analysis['correlations']
-                    # Find moderately correlated pairs (not too high, not too low)
-                    for i, col1 in enumerate(high_var_cols):
-                        if feature_count >= max_features:
-                            break
-                        for col2 in high_var_cols[i+1:]:
-                            if feature_count >= max_features:
-                                break
-                            if col1 in corr_matrix.index and col2 in corr_matrix.columns:
-                                corr_val = corr_matrix.loc[col1, col2]
-                                if 0.3 <= corr_val <= 0.8:  # Moderate correlation
-                                    new_col = f"{col1}_x_{col2}"
-                                    try:
-                                        if isinstance(df_out, dd.DataFrame):
-                                            df_out[new_col] = df_out[col1] * df_out[col2]
-                                        else:
-                                            df_out[new_col] = df_out[col1] * df_out[col2]
-                                        new_features.append(new_col)
-                                        feature_count += 1
-                                    except Exception as e:
-                                        logger.warning(f"Error creating interaction {new_col}: {str(e)}")
-                
-                # Create mathematical transformations
-                for col in high_var_cols[:min(5, len(high_var_cols))]:
-                    if feature_count >= max_features:
-                        break
-                    
-                    # Skip if too many missing values
-                    if analysis['stats'][col]['missing_rate'] > 0.5:
-                        continue
-                    
-                    try:
-                        # Log transformation (for positive values)
-                        new_col = f"log_{col}"
-                        if isinstance(df_out, dd.DataFrame):
-                            df_out[new_col] = df_out[col].map_partitions(
-                                lambda s: np.log1p(np.maximum(s, 0)), 
-                                meta=(new_col, 'float64')
-                            )
-                        else:
-                            df_out[new_col] = np.log1p(np.maximum(df_out[col], 0))
-                        new_features.append(new_col)
-                        feature_count += 1
-                        
-                        if feature_count < max_features:
-                            # Square root transformation
-                            new_col = f"sqrt_{col}"
-                            if isinstance(df_out, dd.DataFrame):
-                                df_out[new_col] = df_out[col].map_partitions(
-                                    lambda s: np.sqrt(np.maximum(s, 0)), 
-                                    meta=(new_col, 'float64')
-                                )
-                            else:
-                                df_out[new_col] = np.sqrt(np.maximum(df_out[col], 0))
-                            new_features.append(new_col)
-                            feature_count += 1
-                            
-                    except Exception as e:
-                        logger.warning(f"Error creating transformation for {col}: {str(e)}")
+            # Feature generation strategy based on data types and patterns
+            if not preview:
+                st.write("🧠 **Intelligent Feature Generation Strategy:**")
             
-            # 2. Categorical feature engineering
-            categorical_cols = analysis['categorical_cols']
-            if categorical_cols and feature_count < max_features:
-                for col in categorical_cols[:min(3, len(categorical_cols))]:
-                    if feature_count >= max_features:
-                        break
-                    
-                    try:
-                        # Frequency encoding
-                        new_col = f"freq_{col}"
-                        if isinstance(df_out, dd.DataFrame):
-                            freq_map = df_out[col].value_counts().compute().to_dict()
-                            df_out[new_col] = df_out[col].map(freq_map, meta=(new_col, 'int64'))
-                        else:
-                            freq_map = df_out[col].value_counts().to_dict()
-                            df_out[new_col] = df_out[col].map(freq_map)
-                        new_features.append(new_col)
-                        feature_count += 1
-                        
-                    except Exception as e:
-                        logger.warning(f"Error creating frequency encoding for {col}: {str(e)}")
+            # 1. Advanced numeric features (40% of budget)
+            numeric_budget = int(feature_budget * 0.4)
+            if analysis['numeric_cols'] and numeric_budget > 0:
+                if not preview:
+                    st.write(f"📊 Generating {numeric_budget} advanced numeric features...")
+                df_out, numeric_features = create_advanced_numeric_features(df_out, analysis, numeric_budget)
+                all_new_features.extend(numeric_features)
+                feature_budget -= len(numeric_features)
             
-            # 3. Datetime feature engineering
-            datetime_cols = analysis['datetime_cols']
-            if datetime_cols and feature_count < max_features:
-                datetime_features = ["year", "month", "dayofweek", "hour"]
-                for col in datetime_cols[:min(2, len(datetime_cols))]:
-                    if feature_count >= max_features:
-                        break
-                    
-                    for feature in datetime_features:
-                        if feature_count >= max_features:
-                            break
-                        
-                        try:
-                            new_col = f"{col}_{feature}"
-                            if isinstance(df_out, dd.DataFrame):
-                                df_out[new_col] = getattr(df_out[col].dt, feature)
-                            else:
-                                df_out[new_col] = getattr(df_out[col].dt, feature)
-                            new_features.append(new_col)
-                            feature_count += 1
-                            
-                        except Exception as e:
-                            logger.warning(f"Error creating datetime feature {new_col}: {str(e)}")
+            # 2. Advanced categorical features (25% of budget)
+            categorical_budget = int(max_features * 0.25)
+            if analysis['categorical_cols'] and categorical_budget > 0 and feature_budget > 0:
+                if not preview:
+                    st.write(f"🏷️ Generating {min(categorical_budget, feature_budget)} categorical features...")
+                df_out, cat_features = create_advanced_categorical_features(df_out, analysis, min(categorical_budget, feature_budget))
+                all_new_features.extend(cat_features)
+                feature_budget -= len(cat_features)
             
-            # 4. Text feature engineering
-            text_cols = analysis['text_cols']
-            if text_cols and feature_count < max_features:
-                for col in text_cols[:min(2, len(text_cols))]:
-                    if feature_count >= max_features:
-                        break
-                    
-                    try:
-                        # Text length
-                        new_col = f"len_{col}"
-                        if isinstance(df_out, dd.DataFrame):
-                            df_out[new_col] = df_out[col].map_partitions(
-                                lambda s: s.astype(str).str.len(), 
-                                meta=(new_col, 'int64')
-                            )
-                        else:
-                            df_out[new_col] = df_out[col].astype(str).str.len()
-                        new_features.append(new_col)
-                        feature_count += 1
-                        
-                    except Exception as e:
-                        logger.warning(f"Error creating text feature for {col}: {str(e)}")
+            # 3. Advanced datetime features (20% of budget)
+            datetime_budget = int(max_features * 0.2)
+            if analysis['datetime_cols'] and datetime_budget > 0 and feature_budget > 0:
+                if not preview:
+                    st.write(f"📅 Generating {min(datetime_budget, feature_budget)} datetime features...")
+                df_out, dt_features = create_advanced_datetime_features(df_out, analysis, min(datetime_budget, feature_budget))
+                all_new_features.extend(dt_features)
+                feature_budget -= len(dt_features)
             
-            # 5. Cross-feature engineering (categorical-numeric interactions)
-            if categorical_cols and numeric_cols and feature_count < max_features:
-                for cat_col in categorical_cols[:min(2, len(categorical_cols))]:
-                    if feature_count >= max_features:
-                        break
-                    for num_col in numeric_cols[:min(2, len(numeric_cols))]:
-                        if feature_count >= max_features:
-                            break
-                        
-                        try:
-                            # Mean encoding
-                            new_col = f"mean_{num_col}_by_{cat_col}"
-                            if isinstance(df_out, dd.DataFrame):
-                                grouped_mean = df_out.groupby(cat_col)[num_col].mean().compute()
-                                df_out[new_col] = df_out[cat_col].map(grouped_mean, meta=(new_col, 'float64'))
-                            else:
-                                grouped_mean = df_out.groupby(cat_col)[num_col].mean()
-                                df_out[new_col] = df_out[cat_col].map(grouped_mean)
-                            new_features.append(new_col)
-                            feature_count += 1
-                            
-                        except Exception as e:
-                            logger.warning(f"Error creating cross-feature {new_col}: {str(e)}")
+            # 4. Advanced text features (10% of budget)
+            text_budget = int(max_features * 0.1)
+            if analysis['text_cols'] and text_budget > 0 and feature_budget > 0:
+                if not preview:
+                    st.write(f"📝 Generating {min(text_budget, feature_budget)} text features...")
+                df_out, text_features = create_advanced_text_features(df_out, analysis, min(text_budget, feature_budget))
+                all_new_features.extend(text_features)
+                feature_budget -= len(text_features)
             
-            # 6. Feature selection based on variance
-            if new_features and not preview:
+            # 5. Clustering features (3% of budget)
+            if feature_budget > 0 and len(analysis['numeric_cols']) >= 2:
+                if not preview:
+                    st.write("🎯 Generating clustering-based features...")
+                df_out, cluster_features = create_clustering_features(df_out, analysis, min(5, feature_budget))
+                all_new_features.extend(cluster_features)
+                feature_budget -= len(cluster_features)
+            
+            # 6. PCA features (2% of budget)
+            if feature_budget > 0 and len(analysis['numeric_cols']) >= 3:
+                if not preview:
+                    st.write("🔍 Generating PCA-based features...")
+                df_out, pca_features = create_pca_features(df_out, analysis, min(5, feature_budget))
+                all_new_features.extend(pca_features)
+                feature_budget -= len(pca_features)
+            
+            # Feature quality assessment and selection
+            if all_new_features and not preview:
+                st.write("🎯 Performing intelligent feature selection...")
                 try:
                     # Remove low-variance features
                     low_var_features = []
-                    for col in new_features:
+                    for col in all_new_features:
                         if col in df_out.columns:
                             col_var = df_out[col].var()
                             if isinstance(df_out, dd.DataFrame):
                                 col_var = col_var.compute()
-                            if pd.isna(col_var) or col_var < 1e-8:
+                            if pd.isna(col_var) or col_var < FEATURE_CONFIG['min_variance_threshold']:
                                 low_var_features.append(col)
                     
                     if low_var_features:
                         df_out = df_out.drop(columns=low_var_features)
-                        new_features = [col for col in new_features if col not in low_var_features]
-                        
+                        all_new_features = [col for col in all_new_features if col not in low_var_features]
+                        if not preview:
+                            st.write(f"🗑️ Removed {len(low_var_features)} low-variance features")
+                    
+                    # Remove highly correlated features
+                    if len(all_new_features) > 1:
+                        numeric_new_features = [col for col in all_new_features if is_numeric_dtype(df_out[col])]
+                        if len(numeric_new_features) > 1:
+                            # Sample for correlation computation
+                            if isinstance(df_out, dd.DataFrame):
+                                corr_sample = sample_for_preview(df_out[numeric_new_features], n=5000)
+                            else:
+                                corr_sample = df_out[numeric_new_features] if len(df_out) <= 5000 else sample_for_preview(df_out[numeric_new_features], n=5000)
+                            
+                            if not corr_sample.empty:
+                                corr_matrix = corr_sample.corr().abs()
+                                upper_triangle = np.triu(np.ones(corr_matrix.shape), k=1).astype(bool)
+                                upper_corr = corr_matrix.where(upper_triangle)
+                                
+                                high_corr_features = []
+                                for column in upper_corr.columns:
+                                    if any(upper_corr[column] > FEATURE_CONFIG['correlation_threshold']):
+                                        high_corr_features.append(column)
+                                
+                                if high_corr_features:
+                                    df_out = df_out.drop(columns=high_corr_features)
+                                    all_new_features = [col for col in all_new_features if col not in high_corr_features]
+                                    if not preview:
+                                        st.write(f"🔗 Removed {len(high_corr_features)} highly correlated features")
+                    
+                    # Feature importance-based selection if target is provided
+                    if target_col and target_col in df_out.columns and len(all_new_features) > max_features // 2:
+                        if not preview:
+                            st.write("🎯 Selecting top features based on importance...")
+                        try:
+                            # Calculate feature importance for new features
+                            importance_scores = calculate_feature_importance(
+                                sample_for_preview(df_out, n=5000) if len(df_out) > 5000 else df_out, 
+                                target_col, 
+                                {'numeric_cols': [col for col in all_new_features if is_numeric_dtype(df_out[col])]}
+                            )
+                            
+                            if importance_scores:
+                                # Sort features by importance
+                                sorted_features = sorted(
+                                    importance_scores.items(), 
+                                    key=lambda x: x[1].get('mutual_info', 0) + x[1].get('rf_importance', 0), 
+                                    reverse=True
+                                )
+                                
+                                # Keep top features
+                                top_features = [feat[0] for feat in sorted_features[:max_features//2]]
+                                features_to_remove = [col for col in all_new_features if col in importance_scores and col not in top_features]
+                                
+                                if features_to_remove:
+                                    df_out = df_out.drop(columns=features_to_remove)
+                                    all_new_features = [col for col in all_new_features if col not in features_to_remove]
+                                    if not preview:
+                                        st.write(f"📈 Selected {len(top_features)} most important features")
+                        except Exception as e:
+                            logger.warning(f"Error in importance-based selection: {str(e)}")
+                    
                 except Exception as e:
                     logger.warning(f"Error in feature selection: {str(e)}")
         
-        msg = f"Generated {len(new_features)} features"
-        if new_features:
-            msg += f": {', '.join(new_features[:10])}"  # Show first 10 features
-            if len(new_features) > 10:
-                msg += f" and {len(new_features) - 10} more"
+        # Generate comprehensive report
+        msg = f"🎉 Generated {len(all_new_features)} high-quality features"
+        
+        if all_new_features:
+            # Categorize features by type
+            feature_types = {
+                'numeric_transformations': [f for f in all_new_features if any(prefix in f for prefix in ['log_', 'sqrt_', 'zscore_', 'reciprocal_'])],
+                'interactions': [f for f in all_new_features if '_x_' in f or '_div_' in f],
+                'categorical_encodings': [f for f in all_new_features if any(prefix in f for prefix in ['freq_', 'rank_', 'is_'])],
+                'datetime_features': [f for f in all_new_features if any(suffix in f for suffix in ['_year', '_month', '_day', '_hour', '_weekend', '_sin', '_cos'])],
+                'text_features': [f for f in all_new_features if any(prefix in f for prefix in ['len_', 'word_count_', 'digit_count_'])],
+                'clustering_features': [f for f in all_new_features if 'cluster' in f],
+                'pca_features': [f for f in all_new_features if 'pca_component' in f]
+            }
+            
+            feature_summary = []
+            for ftype, features in feature_types.items():
+                if features:
+                    feature_summary.append(f"{ftype.replace('_', ' ').title()}: {len(features)}")
+            
+            if feature_summary:
+                msg += f"\n📋 Feature breakdown: {', '.join(feature_summary)}"
         
         logger.info(msg)
         
@@ -846,7 +1629,12 @@ def automated_feature_engineering(df: Union[pd.DataFrame, dd.DataFrame], max_fea
                     st.session_state.pipeline = []
                 st.session_state.pipeline.append({
                     "kind": "automated_feature_engineering", 
-                    "params": {"max_features": max_features, "features": new_features}
+                    "params": {
+                        "max_features": max_features, 
+                        "features": all_new_features,
+                        "target_col": target_col,
+                        "feature_types": {k: len(v) for k, v in feature_types.items() if v}
+                    }
                 })
         
         return df_out, msg
@@ -1486,4 +2274,3 @@ def section_feature_engineering():
     except Exception as e:
         logger.error(f"Error in section_feature_engineering: {str(e)}")
         st.error(f"An unexpected error occurred: {str(e)}")
-        st.info("Please try refreshing the page or contact support if the issue persists.")
