@@ -8,64 +8,126 @@ from sklearn.feature_selection import SelectKBest, mutual_info_regression
 from pandas.api.types import is_numeric_dtype, is_datetime64_any_dtype, is_string_dtype
 import altair as alt
 import logging
-from typing import List, Tuple, Dict, Any
+from typing import List, Tuple, Dict, Any, Optional, Union
 from datetime import datetime
 import threading
 import uuid
 import numexpr as ne
 import io
+import warnings
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Suppress warnings for cleaner output
+warnings.filterwarnings('ignore', category=FutureWarning)
 
 # Placeholder implementations for external utilities
-def dtype_split(df: pd.DataFrame | dd.DataFrame) -> Tuple[List[str], List[str]]:
+def dtype_split(df: Union[pd.DataFrame, dd.DataFrame]) -> Tuple[List[str], List[str]]:
     """Split columns into numeric and non-numeric."""
-    num_cols = [col for col in df.columns if is_numeric_dtype(df[col])]
-    cat_cols = [col for col in df.columns if col not in num_cols]
-    return num_cols, cat_cols
+    try:
+        num_cols = [col for col in df.columns if is_numeric_dtype(df[col])]
+        cat_cols = [col for col in df.columns if col not in num_cols]
+        return num_cols, cat_cols
+    except Exception as e:
+        logger.error(f"Error in dtype_split: {str(e)}")
+        return [], []
 
-def sample_for_preview(df: pd.DataFrame | dd.DataFrame, n: int = 1000) -> pd.DataFrame:
+def sample_for_preview(df: Union[pd.DataFrame, dd.DataFrame], n: int = 1000) -> pd.DataFrame:
     """Sample DataFrame for preview."""
-    if isinstance(df, dd.DataFrame):
-        return df.sample(frac=n / df.shape[0].compute()).compute()
-    return df.sample(n=min(n, len(df)))
+    try:
+        if isinstance(df, dd.DataFrame):
+            total_rows = len(df)
+            if hasattr(total_rows, 'compute'):
+                total_rows = total_rows.compute()
+            if total_rows == 0:
+                return pd.DataFrame()
+            frac = min(1.0, n / max(total_rows, 1))
+            return df.sample(frac=frac).compute()
+        return df.sample(n=min(n, len(df))) if len(df) > 0 else df
+    except Exception as e:
+        logger.error(f"Error in sample_for_preview: {str(e)}")
+        return pd.DataFrame()
 
 def alt_histogram(series: pd.Series, title: str) -> alt.Chart:
     """Create a histogram using Altair."""
-    return alt.Chart(pd.DataFrame({title: series})).mark_bar().encode(
-        x=alt.X(f"{title}:Q", bin=True),
-        y='count()'
-    )
+    try:
+        if series.empty:
+            return alt.Chart(pd.DataFrame()).mark_text(text="No data available")
+        
+        data = pd.DataFrame({title: series.dropna()})
+        if data.empty:
+            return alt.Chart(pd.DataFrame()).mark_text(text="No valid data")
+            
+        return alt.Chart(data).mark_bar().encode(
+            x=alt.X(f"{title}:Q", bin=True),
+            y='count()'
+        )
+    except Exception as e:
+        logger.error(f"Error in alt_histogram: {str(e)}")
+        return alt.Chart(pd.DataFrame()).mark_text(text="Error creating histogram")
 
-def compute_basic_stats(df: pd.DataFrame | dd.DataFrame) -> Dict[str, Any]:
+def compute_basic_stats(df: Union[pd.DataFrame, dd.DataFrame]) -> Dict[str, Any]:
     """Compute basic statistics."""
-    if isinstance(df, dd.DataFrame):
-        df = df.compute()
-    return {
-        'n_rows': len(df),
-        'n_columns': len(df.columns),
-        'columns': list(df.columns)
-    }
+    try:
+        if df is None:
+            return {'n_rows': 0, 'n_columns': 0, 'columns': []}
+            
+        if isinstance(df, dd.DataFrame):
+            df_computed = df.compute()
+        else:
+            df_computed = df
+            
+        return {
+            'n_rows': len(df_computed),
+            'n_columns': len(df_computed.columns),
+            'columns': list(df_computed.columns)
+        }
+    except Exception as e:
+        logger.error(f"Error in compute_basic_stats: {str(e)}")
+        return {'n_rows': 0, 'n_columns': 0, 'columns': []}
 
 def compare_stats(before: Dict[str, Any], after: Dict[str, Any]) -> Dict[str, Any]:
     """Compare stats before and after."""
-    return {
-        'n_columns_before': before['n_columns'],
-        'n_columns_after': after['n_columns'],
-        'added_columns': [c for c in after['columns'] if c not in before['columns']],
-        'removed_columns': [c for c in before['columns'] if c not in after['columns']]
-    }
+    try:
+        before_cols = set(before.get('columns', []))
+        after_cols = set(after.get('columns', []))
+        
+        return {
+            'n_columns_before': before.get('n_columns', 0),
+            'n_columns_after': after.get('n_columns', 0),
+            'added_columns': list(after_cols - before_cols),
+            'removed_columns': list(before_cols - after_cols)
+        }
+    except Exception as e:
+        logger.error(f"Error in compare_stats: {str(e)}")
+        return {
+            'n_columns_before': 0,
+            'n_columns_after': 0,
+            'added_columns': [],
+            'removed_columns': []
+        }
 
 def push_history(message: str):
     """Push message to session state history."""
-    with threading.Lock():
-        if 'history' not in st.session_state:
-            st.session_state.history = []
-        st.session_state.history.append({'message': message, 'timestamp': datetime.now().isoformat()})
+    try:
+        with session_lock:
+            if 'history' not in st.session_state:
+                st.session_state.history = []
+            st.session_state.history.append({
+                'message': str(message)[:500],  # Limit message length
+                'timestamp': datetime.now().isoformat()
+            })
+            # Limit history size to prevent memory issues
+            if len(st.session_state.history) > 100:
+                st.session_state.history = st.session_state.history[-100:]
+    except Exception as e:
+        logger.error(f"Error in push_history: {str(e)}")
 
 def validate_step_function(func):
     """Validate a step function (placeholder)."""
     return func
-
-logger = logging.getLogger(__name__)
 
 # Thread lock for session state updates
 session_lock = threading.Lock()
@@ -94,232 +156,390 @@ FEATURE_STEP_REGISTRY = {
     }
 }
 
-def create_polynomial_features(df: pd.DataFrame | dd.DataFrame, columns: List[str], degree: int = 2, preview: bool = False) -> Tuple[pd.DataFrame | dd.DataFrame, str]:
+def create_polynomial_features(df: Union[pd.DataFrame, dd.DataFrame], columns: List[str], degree: int = 2, preview: bool = False) -> Tuple[Union[pd.DataFrame, dd.DataFrame], str]:
     """Create polynomial and interaction features for specified numeric columns."""
     try:
         if not isinstance(df, (pd.DataFrame, dd.DataFrame)):
             return df, "Invalid DataFrame input"
         
-        columns = [c for c in columns if c in df.columns and is_numeric_dtype(df[c])]
-        if not columns:
-            return df, "No valid numeric columns selected for polynomial features"
+        if df.empty:
+            return df, "DataFrame is empty"
+            
+        # Validate and filter columns
+        valid_columns = []
+        for col in columns:
+            if col not in df.columns:
+                continue
+            if not is_numeric_dtype(df[col]):
+                continue
+            # Check for sufficient variance
+            col_var = df[col].var()
+            if isinstance(df, dd.DataFrame):
+                col_var = col_var.compute()
+            if pd.isna(col_var) or col_var == 0:
+                continue
+            valid_columns.append(col)
         
-        if len(set(df.columns)) != len(df.columns):
-            return df, "Duplicate column names detected; please resolve before processing"
+        if not valid_columns:
+            return df, "No valid numeric columns with sufficient variance selected for polynomial features"
         
+        # Validate degree
         degree = max(1, min(5, int(degree)))
+        
+        # Check for memory constraints
+        if len(valid_columns) > 10 and degree > 2:
+            return df, "Too many columns for high-degree polynomial features (memory constraint)"
+        
         df_out = df if preview else df.copy()
         
         with st.spinner(f"Generating polynomial features (degree={degree})..."):
-            if isinstance(df_out, dd.DataFrame):
-                poly = DaskPolynomialFeatures(degree=degree, include_bias=False)
-                poly_features = poly.fit_transform(df_out[columns])
-                feature_names = poly.get_feature_names_out(columns)
-                poly_df = dd.from_array(poly_features, columns=feature_names, index=df_out.index)
-                df_out = df_out.join(poly_df)
-            else:
-                poly = PolynomialFeatures(degree=degree, include_bias=False)
-                poly_features = poly.fit_transform(df_out[columns])
-                feature_names = poly.get_feature_names_out(columns)
-                poly_df = pd.DataFrame(poly_features, columns=feature_names, index=df_out.index)
-                df_out = df_out.join(poly_df)
-        
-        msg = f"Created polynomial features (degree={degree}) for columns: {', '.join(columns)}"
-        logger.info(msg)
-        if not preview:
-            with session_lock:
-                st.session_state.pipeline.append({"kind": "create_polynomial_features", "params": {"columns": columns, "degree": degree}})
-        return df_out, msg
+            try:
+                if isinstance(df_out, dd.DataFrame):
+                    # Use Dask for large datasets
+                    poly = DaskPolynomialFeatures(degree=degree, include_bias=False)
+                    selected_data = df_out[valid_columns].fillna(0)  # Handle NaN values
+                    poly_features = poly.fit_transform(selected_data)
+                    feature_names = poly.get_feature_names_out(valid_columns)
+                    
+                    # Create new DataFrame with polynomial features
+                    poly_df = dd.from_array(poly_features, columns=feature_names)
+                    # Remove original columns from polynomial features to avoid duplication
+                    new_feature_names = [name for name in feature_names if name not in valid_columns]
+                    if new_feature_names:
+                        poly_df_new = poly_df[new_feature_names]
+                        df_out = dd.concat([df_out, poly_df_new], axis=1)
+                else:
+                    # Use sklearn for regular pandas DataFrames
+                    poly = PolynomialFeatures(degree=degree, include_bias=False)
+                    selected_data = df_out[valid_columns].fillna(0)  # Handle NaN values
+                    poly_features = poly.fit_transform(selected_data)
+                    feature_names = poly.get_feature_names_out(valid_columns)
+                    
+                    # Create DataFrame with polynomial features
+                    poly_df = pd.DataFrame(poly_features, columns=feature_names, index=df_out.index)
+                    # Remove original columns from polynomial features to avoid duplication
+                    new_feature_names = [name for name in feature_names if name not in valid_columns]
+                    if new_feature_names:
+                        for name in new_feature_names:
+                            df_out[name] = poly_df[name]
+                
+                msg = f"Created polynomial features (degree={degree}) for columns: {', '.join(valid_columns)}"
+                logger.info(msg)
+                
+                if not preview:
+                    with session_lock:
+                        if 'pipeline' not in st.session_state:
+                            st.session_state.pipeline = []
+                        st.session_state.pipeline.append({
+                            "kind": "create_polynomial_features", 
+                            "params": {"columns": valid_columns, "degree": degree}
+                        })
+                
+                return df_out, msg
+                
+            except MemoryError:
+                logger.error("MemoryError in create_polynomial_features")
+                return df, "Error: Dataset too large for polynomial feature creation"
+                
     except ValueError as e:
         logger.error(f"ValueError in create_polynomial_features: {str(e)}")
         return df, f"Error creating polynomial features: {str(e)}"
-    except MemoryError:
-        logger.error("MemoryError in create_polynomial_features: Dataset too large")
-        return df, "Error: Dataset too large for polynomial feature creation"
     except Exception as e:
         logger.error(f"Unexpected error in create_polynomial_features: {str(e)}")
         return df, f"Unexpected error: {str(e)}"
 
-def extract_datetime_features(df: pd.DataFrame | dd.DataFrame, columns: List[str], features: List[str], preview: bool = False) -> Tuple[pd.DataFrame | dd.DataFrame, str]:
+def extract_datetime_features(df: Union[pd.DataFrame, dd.DataFrame], columns: List[str], features: List[str], preview: bool = False) -> Tuple[Union[pd.DataFrame, dd.DataFrame], str]:
     """Extract datetime features (e.g., year, month, day) from specified columns."""
     try:
         if not isinstance(df, (pd.DataFrame, dd.DataFrame)):
             return df, "Invalid DataFrame input"
         
-        columns = [c for c in columns if c in df.columns]
-        if not columns:
+        if df.empty:
+            return df, "DataFrame is empty"
+            
+        # Validate columns
+        valid_columns = [c for c in columns if c in df.columns]
+        if not valid_columns:
             return df, "No valid columns selected for datetime features"
         
-        for col in columns:
-            if not is_datetime64_any_dtype(df[col]):
-                sample = df[col].head(5) if isinstance(df, dd.DataFrame) else df[col][:5]
-                try:
-                    pd.to_datetime(sample, errors='raise')
-                except ValueError:
-                    return df, f"Column {col} contains invalid datetime values"
-        
-        valid_features = ["year", "month", "day", "hour", "minute", "second", "dayofweek", "quarter"]
-        features = [f for f in features if f in valid_features]
-        if not features:
+        # Validate features
+        valid_features_list = ["year", "month", "day", "hour", "minute", "second", "dayofweek", "quarter"]
+        valid_features = [f for f in features if f in valid_features_list]
+        if not valid_features:
             return df, "No valid datetime features selected"
         
         df_out = df if preview else df.copy()
         invalid_counts = {}
         
-        with st.spinner(f"Extracting datetime features ({', '.join(features)})"):
-            for col in columns:
-                if not is_datetime64_any_dtype(df_out[col]):
+        with st.spinner(f"Extracting datetime features ({', '.join(valid_features)})"):
+            for col in valid_columns:
+                try:
+                    # Convert to datetime if not already
+                    if not is_datetime64_any_dtype(df_out[col]):
+                        if isinstance(df_out, dd.DataFrame):
+                            df_out[col] = dd.to_datetime(df_out[col], errors='coerce')
+                        else:
+                            df_out[col] = pd.to_datetime(df_out[col], errors='coerce')
+                    
+                    # Count invalid dates
+                    invalid_count = df_out[col].isna().sum()
                     if isinstance(df_out, dd.DataFrame):
-                        df_out[col] = dd.to_datetime(df_out[col], errors='coerce')
-                    else:
-                        df_out[col] = pd.to_datetime(df_out[col], errors='coerce')
-                
-                invalid_count = df_out[col].isna().sum()
-                if isinstance(df_out, dd.DataFrame):
-                    invalid_count = invalid_count.compute()
-                if invalid_count > 0:
-                    invalid_counts[col] = invalid_count
-                
-                for feature in features:
-                    new_col = f"{col}_{feature}"
-                    if isinstance(df_out, dd.DataFrame):
-                        df_out[new_col] = getattr(df_out[col].dt, feature)
-                    else:
-                        df_out[new_col] = getattr(df_out[col].dt, feature)
+                        invalid_count = invalid_count.compute()
+                    if invalid_count > 0:
+                        invalid_counts[col] = invalid_count
+                    
+                    # Extract features
+                    for feature in valid_features:
+                        new_col = f"{col}_{feature}"
+                        if new_col not in df_out.columns:  # Avoid overwriting existing columns
+                            try:
+                                if isinstance(df_out, dd.DataFrame):
+                                    df_out[new_col] = getattr(df_out[col].dt, feature)
+                                else:
+                                    df_out[new_col] = getattr(df_out[col].dt, feature)
+                            except AttributeError:
+                                logger.warning(f"Feature {feature} not available for column {col}")
+                                continue
+                                
+                except Exception as e:
+                    logger.error(f"Error processing column {col}: {str(e)}")
+                    continue
         
-        msg = f"Extracted datetime features ({', '.join(features)}) for columns: {', '.join(columns)}"
+        msg = f"Extracted datetime features ({', '.join(valid_features)}) for columns: {', '.join(valid_columns)}"
         if invalid_counts:
             msg += f". Warning: Invalid datetimes found in {', '.join(f'{col} ({count} invalid)' for col, count in invalid_counts.items())}"
+        
         logger.info(msg)
+        
         if not preview:
             with session_lock:
-                st.session_state.pipeline.append({"kind": "extract_datetime_features", "params": {"columns": columns, "features": features}})
+                if 'pipeline' not in st.session_state:
+                    st.session_state.pipeline = []
+                st.session_state.pipeline.append({
+                    "kind": "extract_datetime_features", 
+                    "params": {"columns": valid_columns, "features": valid_features}
+                })
+        
         return df_out, msg
+        
     except ValueError as e:
         logger.error(f"ValueError in extract_datetime_features: {str(e)}")
         return df, f"Error extracting datetime features: {str(e)}"
     except MemoryError:
-        logger.error("MemoryError in extract_datetime_features: Dataset too large")
+        logger.error("MemoryError in extract_datetime_features")
         return df, "Error: Dataset too large for datetime extraction"
     except Exception as e:
         logger.error(f"Unexpected error in extract_datetime_features: {str(e)}")
         return df, f"Unexpected error: {str(e)}"
 
-def bin_features(df: pd.DataFrame | dd.DataFrame, columns: List[str], bins: int = 10, preview: bool = False) -> Tuple[pd.DataFrame | dd.DataFrame, str]:
+def bin_features(df: Union[pd.DataFrame, dd.DataFrame], columns: List[str], bins: int = 10, preview: bool = False) -> Tuple[Union[pd.DataFrame, dd.DataFrame], str]:
     """Bin numeric features into discrete intervals."""
     try:
         if not isinstance(df, (pd.DataFrame, dd.DataFrame)):
             return df, "Invalid DataFrame input"
         
-        columns = [c for c in columns if c in df.columns and is_numeric_dtype(df[c])]
-        if not columns:
-            return df, "No valid numeric columns selected for binning"
-        
+        if df.empty:
+            return df, "DataFrame is empty"
+            
+        # Validate columns
+        valid_columns = []
         for col in columns:
+            if col not in df.columns:
+                continue
+            if not is_numeric_dtype(df[col]):
+                continue
+            
+            # Check for sufficient unique values
             unique_count = df[col].nunique()
             if isinstance(df, dd.DataFrame):
                 unique_count = unique_count.compute()
             if unique_count < 2:
-                return df, f"Column {col} has insufficient unique values for binning"
+                continue
+                
+            valid_columns.append(col)
         
+        if not valid_columns:
+            return df, "No valid numeric columns with sufficient unique values selected for binning"
+        
+        # Validate bins parameter
         bins = max(2, min(50, int(bins)))
         df_out = df if preview else df.copy()
         
         with st.spinner(f"Binning columns into {bins} bins"):
-            for col in columns:
+            for col in valid_columns:
                 new_col = f"{col}_binned"
                 try:
                     if isinstance(df_out, dd.DataFrame):
-                        bins_edges = df_out[col].quantile(np.linspace(0, 1, bins + 1)).compute()
+                        # Use quantile-based binning for Dask
+                        quantiles = np.linspace(0, 1, bins + 1)
+                        bin_edges = df_out[col].quantile(quantiles).compute()
+                        bin_edges = bin_edges.drop_duplicates().sort_values()
+                        
+                        if len(bin_edges) < 2:
+                            logger.warning(f"Insufficient unique values for binning column {col}")
+                            continue
+                            
                         df_out[new_col] = df_out[col].map_partitions(
-                            lambda s: pd.cut(s, bins=bins_edges, labels=False, include_lowest=True),
+                            lambda s: pd.cut(s, bins=bin_edges, labels=False, include_lowest=True, duplicates='drop'),
                             meta=(new_col, 'int64')
                         )
                     else:
-                        df_out[new_col] = pd.qcut(df_out[col], q=bins, duplicates='drop')
+                        # Use pandas qcut for regular DataFrames
+                        try:
+                            df_out[new_col] = pd.qcut(df_out[col], q=bins, labels=False, duplicates='drop')
+                        except ValueError:
+                            # Fallback to regular cut if qcut fails
+                            df_out[new_col] = pd.cut(df_out[col], bins=bins, labels=False, include_lowest=True, duplicates='drop')
+                            
                 except ValueError as e:
                     logger.warning(f"Skipping binning for {col}: {str(e)}")
-                    msg = f"Error binning column {col}: {str(e)}"
-                    return df_out, msg
+                    continue
         
-        msg = f"Binned columns ({bins} bins): {', '.join(columns)}"
+        msg = f"Binned columns ({bins} bins): {', '.join(valid_columns)}"
         logger.info(msg)
+        
         if not preview:
             with session_lock:
-                st.session_state.pipeline.append({"kind": "bin_features", "params": {"columns": columns, "bins": bins}})
+                if 'pipeline' not in st.session_state:
+                    st.session_state.pipeline = []
+                st.session_state.pipeline.append({
+                    "kind": "bin_features", 
+                    "params": {"columns": valid_columns, "bins": bins}
+                })
+        
         return df_out, msg
+        
     except ValueError as e:
         logger.error(f"ValueError in bin_features: {str(e)}")
         return df, f"Error binning features: {str(e)}"
     except MemoryError:
-        logger.error("MemoryError in bin_features: Dataset too large")
+        logger.error("MemoryError in bin_features")
         return df, "Error: Dataset too large for binning"
     except Exception as e:
         logger.error(f"Unexpected error in bin_features: {str(e)}")
         return df, f"Unexpected error: {str(e)}"
 
-def select_features_correlation(df: pd.DataFrame | dd.DataFrame, threshold: float = 0.8, preview: bool = False) -> Tuple[pd.DataFrame | dd.DataFrame, str]:
+def select_features_correlation(df: Union[pd.DataFrame, dd.DataFrame], threshold: float = 0.8, preview: bool = False) -> Tuple[Union[pd.DataFrame, dd.DataFrame], str]:
     """Select features based on correlation analysis."""
     try:
         if not isinstance(df, (pd.DataFrame, dd.DataFrame)):
             return df, "Invalid DataFrame input"
         
-        threshold = max(0.1, min(0.9, float(threshold)))
+        if df.empty:
+            return df, "DataFrame is empty"
+            
+        # Validate threshold
+        threshold = max(0.1, min(0.99, float(threshold)))
+        
+        # Get numeric columns
         num_cols, _ = dtype_split(df)
         if not num_cols:
             return df, "No numeric columns available for correlation analysis"
         
+        # Filter out constant columns
+        valid_num_cols = []
         for col in num_cols:
-            unique_count = df[col].nunique()
-            if isinstance(df, dd.DataFrame):
-                unique_count = unique_count.compute()
-            if unique_count <= 1:
-                num_cols.remove(col)
-                logger.warning(f"Removed constant column {col} from correlation analysis")
+            try:
+                col_var = df[col].var()
+                if isinstance(df, dd.DataFrame):
+                    col_var = col_var.compute()
+                if not pd.isna(col_var) and col_var > 1e-10:  # Not constant
+                    valid_num_cols.append(col)
+            except Exception:
+                continue
         
-        if not num_cols:
-            return df, "No valid numeric columns after removing constants"
+        if len(valid_num_cols) < 2:
+            return df, "Insufficient numeric columns for correlation analysis"
         
         with st.spinner("Computing correlation matrix..."):
-            if isinstance(df, dd.DataFrame):
-                corr_matrix = df[num_cols].corr()
-            else:
-                corr_matrix = df[num_cols].corr()
+            try:
+                if isinstance(df, dd.DataFrame):
+                    # Sample for correlation computation if dataset is too large
+                    if len(df) > 50000:
+                        df_sample = sample_for_preview(df[valid_num_cols], n=50000)
+                        corr_matrix = df_sample.corr()
+                    else:
+                        corr_matrix = df[valid_num_cols].corr().compute()
+                else:
+                    corr_matrix = df[valid_num_cols].corr()
+                
+                # Handle NaN values in correlation matrix
+                corr_matrix = corr_matrix.fillna(0)
+                
+                # Find highly correlated features
+                corr_matrix_abs = corr_matrix.abs()
+                upper_triangle = np.triu(np.ones(corr_matrix_abs.shape), k=1).astype(bool)
+                upper_corr = corr_matrix_abs.where(upper_triangle)
+                
+                # Find columns to drop
+                to_drop = []
+                for column in upper_corr.columns:
+                    if any(upper_corr[column] > threshold):
+                        to_drop.append(column)
+                
+                df_out = df if preview else df.copy()
+                
+                if to_drop:
+                    # Ensure we don't drop all columns
+                    remaining_cols = [col for col in df_out.columns if col not in to_drop]
+                    if len(remaining_cols) == 0:
+                        return df, "Cannot drop all columns due to correlation threshold"
+                    
+                    df_out = df_out.drop(columns=to_drop)
+                    msg = f"Dropped highly correlated columns (threshold={threshold}): {', '.join(to_drop)}"
+                else:
+                    msg = f"No columns dropped (correlation threshold={threshold})"
+                
+                logger.info(msg)
+                
+                if not preview:
+                    with session_lock:
+                        if 'pipeline' not in st.session_state:
+                            st.session_state.pipeline = []
+                        st.session_state.pipeline.append({
+                            "kind": "select_features_correlation", 
+                            "params": {"threshold": threshold}
+                        })
+                
+                return df_out, msg
+                
+            except Exception as e:
+                logger.error(f"Error computing correlation: {str(e)}")
+                return df, f"Error computing correlation matrix: {str(e)}"
         
-        corr_matrix = corr_matrix.fillna(0)
-        corr_matrix = corr_matrix.abs()
-        upper = corr_matrix.where(np.triu(np.ones(corr_matrix.shape), k=1).astype(bool))
-        to_drop = [column for column in upper.columns if any(upper[column] > threshold)]
-        
-        df_out = df if preview else df.copy()
-        if to_drop:
-            df_out = df_out.drop(columns=to_drop)
-            msg = f"Dropped highly correlated columns (threshold={threshold}): {', '.join(to_drop)}"
-        else:
-            msg = f"No columns dropped (correlation threshold={threshold})"
-        
-        logger.info(msg)
-        if not preview:
-            with session_lock:
-                st.session_state.pipeline.append({"kind": "select_features_correlation", "params": {"threshold": threshold}})
-        return df_out, msg
     except ValueError as e:
         logger.error(f"ValueError in select_features_correlation: {str(e)}")
         return df, f"Error in correlation-based feature selection: {str(e)}"
     except MemoryError:
-        logger.error("MemoryError in select_features_correlation: Dataset too large")
+        logger.error("MemoryError in select_features_correlation")
         return df, "Error: Dataset too large for correlation analysis"
     except Exception as e:
         logger.error(f"Unexpected error in select_features_correlation: {str(e)}")
         return df, f"Unexpected error: {str(e)}"
 
-def analyze_dataset(df: pd.DataFrame | dd.DataFrame, sample_size: int = 10000) -> Dict[str, Any]:
+def analyze_dataset(df: Union[pd.DataFrame, dd.DataFrame], sample_size: int = 10000) -> Dict[str, Any]:
     """Analyze dataset to identify column types and statistical properties."""
     try:
+        if df is None or df.empty:
+            return {}
+            
+        # Sample for analysis if dataset is large
         if isinstance(df, dd.DataFrame):
-            df_sample = sample_for_preview(df, n=sample_size)
+            total_rows = len(df)
+            if hasattr(total_rows, 'compute'):
+                total_rows = total_rows.compute()
+            if total_rows > sample_size:
+                df_sample = sample_for_preview(df, n=sample_size)
+            else:
+                df_sample = df.compute()
         else:
-            df_sample = df
+            if len(df) > sample_size:
+                df_sample = sample_for_preview(df, n=sample_size)
+            else:
+                df_sample = df
+        
+        if df_sample.empty:
+            return {}
         
         analysis = {
             'numeric_cols': [],
@@ -330,60 +550,96 @@ def analyze_dataset(df: pd.DataFrame | dd.DataFrame, sample_size: int = 10000) -
         }
         
         for col in df.columns:
-            unique_count = df[col].nunique()
-            missing_rate = df[col].isna().mean()
-            if isinstance(df, dd.DataFrame):
-                unique_count = unique_count.compute()
-                missing_rate = missing_rate.compute()
-            
-            analysis['stats'][col] = {
-                'unique_count': unique_count,
-                'missing_rate': missing_rate,
-                'variance': None,
-                'type': None
-            }
-            
-            if is_numeric_dtype(df[col]):
-                analysis['numeric_cols'].append(col)
-                analysis['stats'][col]['type'] = 'numeric'
-                analysis['stats'][col]['variance'] = df[col].var().compute() if isinstance(df, dd.DataFrame) else df[col].var()
-            elif is_datetime64_any_dtype(df[col]):
-                analysis['datetime_cols'].append(col)
-                analysis['stats'][col]['type'] = 'datetime'
-            elif is_string_dtype(df[col]) and unique_count < len(df_sample) * 0.5:
-                analysis['categorical_cols'].append(col)
-                analysis['stats'][col]['type'] = 'categorical'
-            elif is_string_dtype(df[col]):
-                analysis['text_cols'].append(col)
-                analysis['stats'][col]['type'] = 'text'
+            try:
+                # Compute statistics safely
+                unique_count = df[col].nunique()
+                missing_count = df[col].isna().sum()
+                total_count = len(df)
+                
+                if isinstance(df, dd.DataFrame):
+                    unique_count = unique_count.compute()
+                    missing_count = missing_count.compute()
+                    total_count = total_count.compute() if hasattr(total_count, 'compute') else total_count
+                
+                missing_rate = missing_count / max(total_count, 1)
+                
+                analysis['stats'][col] = {
+                    'unique_count': unique_count,
+                    'missing_rate': missing_rate,
+                    'variance': None,
+                    'type': None
+                }
+                
+                # Determine column type
+                if is_numeric_dtype(df[col]):
+                    analysis['numeric_cols'].append(col)
+                    analysis['stats'][col]['type'] = 'numeric'
+                    try:
+                        col_var = df[col].var()
+                        if isinstance(df, dd.DataFrame):
+                            col_var = col_var.compute()
+                        analysis['stats'][col]['variance'] = col_var
+                    except Exception:
+                        analysis['stats'][col]['variance'] = None
+                        
+                elif is_datetime64_any_dtype(df[col]):
+                    analysis['datetime_cols'].append(col)
+                    analysis['stats'][col]['type'] = 'datetime'
+                    
+                elif is_string_dtype(df[col]):
+                    # Distinguish between categorical and text based on unique ratio
+                    unique_ratio = unique_count / max(total_count, 1)
+                    if unique_ratio < 0.5:  # Less than 50% unique values
+                        analysis['categorical_cols'].append(col)
+                        analysis['stats'][col]['type'] = 'categorical'
+                    else:
+                        analysis['text_cols'].append(col)
+                        analysis['stats'][col]['type'] = 'text'
+                else:
+                    # Default to categorical for other types
+                    analysis['categorical_cols'].append(col)
+                    analysis['stats'][col]['type'] = 'other'
+                    
+            except Exception as e:
+                logger.warning(f"Error analyzing column {col}: {str(e)}")
+                continue
         
-        if analysis['numeric_cols']:
-            if isinstance(df, dd.DataFrame):
-                corr_matrix = df[analysis['numeric_cols']].corr().compute()
-            else:
-                corr_matrix = df[analysis['numeric_cols']].corr()
-            analysis['correlations'] = corr_matrix.abs()
+        # Compute correlations for numeric columns
+        if len(analysis['numeric_cols']) > 1:
+            try:
+                numeric_df = df_sample[analysis['numeric_cols']].select_dtypes(include=[np.number])
+                if not numeric_df.empty:
+                    corr_matrix = numeric_df.corr()
+                    analysis['correlations'] = corr_matrix.abs()
+            except Exception as e:
+                logger.warning(f"Error computing correlations: {str(e)}")
         
         return analysis
+        
     except Exception as e:
         logger.error(f"Error in analyze_dataset: {str(e)}")
         return {}
 
-def automated_feature_engineering(df: pd.DataFrame | dd.DataFrame, max_features: int = 50, preview: bool = False, target_col: str = None) -> Tuple[pd.DataFrame | dd.DataFrame, str]:
+def automated_feature_engineering(df: Union[pd.DataFrame, dd.DataFrame], max_features: int = 50, preview: bool = False, target_col: Optional[str] = None) -> Tuple[Union[pd.DataFrame, dd.DataFrame], str]:
     """Generate high-quality features based on dataset analysis."""
     try:
         if not isinstance(df, (pd.DataFrame, dd.DataFrame)):
             return df, "Invalid DataFrame input"
         
-        max_features = max(10, min(200, int(max_features)))
+        if df.empty:
+            return df, "DataFrame is empty"
+            
+        # Validate parameters
+        max_features = max(5, min(200, int(max_features)))
+        
+        # Check for duplicate columns
         if len(set(df.columns)) != len(df.columns):
             return df, "Duplicate column names detected; please resolve before processing"
-        if 'index' not in df.index.name and not df.index.is_unique:
-            return df, "DataFrame must have a unique index for feature engineering"
         
         df_out = df if preview else df.copy()
         
         with st.spinner(f"Analyzing dataset and generating up to {max_features} features..."):
+            # Analyze dataset
             analysis = analyze_dataset(df_out)
             if not analysis:
                 return df, "Error analyzing dataset"
@@ -391,155 +647,237 @@ def automated_feature_engineering(df: pd.DataFrame | dd.DataFrame, max_features:
             new_features = []
             feature_count = 0
             
+            # 1. Numeric feature engineering
             numeric_cols = analysis['numeric_cols']
-            if numeric_cols:
-                high_var_cols = [
-                    col for col in numeric_cols
-                    if analysis['stats'][col]['variance'] is not None and analysis['stats'][col]['variance'] > 0
-                ]
+            if numeric_cols and feature_count < max_features:
+                # Filter high variance columns
+                high_var_cols = []
+                for col in numeric_cols:
+                    if col in analysis['stats'] and analysis['stats'][col]['variance'] is not None:
+                        if analysis['stats'][col]['variance'] > 1e-6:  # Not constant
+                            high_var_cols.append(col)
+                
+                # Create interaction features for correlated pairs
                 if 'correlations' in analysis and len(high_var_cols) >= 2:
                     corr_matrix = analysis['correlations']
-                    upper = corr_matrix.where(np.triu(np.ones(corr_matrix.shape), k=1).astype(bool))
-                    correlated_pairs = [
-                        (corr_matrix.index[i], corr_matrix.columns[j])
-                        for i, j in zip(*np.where(upper > 0.5))
-                    ]
-                    for col1, col2 in correlated_pairs[:min(5, len(correlated_pairs))]:
+                    # Find moderately correlated pairs (not too high, not too low)
+                    for i, col1 in enumerate(high_var_cols):
                         if feature_count >= max_features:
                             break
-                        new_col = f"{col1}_x_{col2}"
-                        if isinstance(df_out, dd.DataFrame):
-                            df_out[new_col] = df_out[col1] * df_out[col2]
-                        else:
-                            df_out[new_col] = df_out[col1] * df_out[col2]
-                        new_features.append(new_col)
-                        feature_count += 1
+                        for col2 in high_var_cols[i+1:]:
+                            if feature_count >= max_features:
+                                break
+                            if col1 in corr_matrix.index and col2 in corr_matrix.columns:
+                                corr_val = corr_matrix.loc[col1, col2]
+                                if 0.3 <= corr_val <= 0.8:  # Moderate correlation
+                                    new_col = f"{col1}_x_{col2}"
+                                    try:
+                                        if isinstance(df_out, dd.DataFrame):
+                                            df_out[new_col] = df_out[col1] * df_out[col2]
+                                        else:
+                                            df_out[new_col] = df_out[col1] * df_out[col2]
+                                        new_features.append(new_col)
+                                        feature_count += 1
+                                    except Exception as e:
+                                        logger.warning(f"Error creating interaction {new_col}: {str(e)}")
                 
+                # Create mathematical transformations
                 for col in high_var_cols[:min(5, len(high_var_cols))]:
                     if feature_count >= max_features:
                         break
-                    if analysis['stats'][col]['missing_rate'] < 0.5:
+                    
+                    # Skip if too many missing values
+                    if analysis['stats'][col]['missing_rate'] > 0.5:
+                        continue
+                    
+                    try:
+                        # Log transformation (for positive values)
                         new_col = f"log_{col}"
                         if isinstance(df_out, dd.DataFrame):
                             df_out[new_col] = df_out[col].map_partitions(
-                                lambda s: np.log1p(s.clip(lower=0)), meta=(new_col, 'float64')
+                                lambda s: np.log1p(np.maximum(s, 0)), 
+                                meta=(new_col, 'float64')
                             )
                         else:
-                            df_out[new_col] = np.log1p(df_out[col].clip(lower=0))
+                            df_out[new_col] = np.log1p(np.maximum(df_out[col], 0))
                         new_features.append(new_col)
                         feature_count += 1
-                        new_col = f"sqrt_{col}"
-                        if isinstance(df_out, dd.DataFrame):
-                            df_out[new_col] = df_out[col].map_partitions(
-                                lambda s: np.sqrt(s.clip(lower=0)), meta=(new_col, 'float64')
-                            )
-                        else:
-                            df_out[new_col] = np.sqrt(df_out[col].clip(lower=0))
-                        new_features.append(new_col)
-                        feature_count += 1
+                        
+                        if feature_count < max_features:
+                            # Square root transformation
+                            new_col = f"sqrt_{col}"
+                            if isinstance(df_out, dd.DataFrame):
+                                df_out[new_col] = df_out[col].map_partitions(
+                                    lambda s: np.sqrt(np.maximum(s, 0)), 
+                                    meta=(new_col, 'float64')
+                                )
+                            else:
+                                df_out[new_col] = np.sqrt(np.maximum(df_out[col], 0))
+                            new_features.append(new_col)
+                            feature_count += 1
+                            
+                    except Exception as e:
+                        logger.warning(f"Error creating transformation for {col}: {str(e)}")
             
+            # 2. Categorical feature engineering
             categorical_cols = analysis['categorical_cols']
-            if categorical_cols:
-                for col in categorical_cols[:min(5, len(categorical_cols))]:
+            if categorical_cols and feature_count < max_features:
+                for col in categorical_cols[:min(3, len(categorical_cols))]:
                     if feature_count >= max_features:
                         break
-                    new_col = f"freq_{col}"
-                    freq = df_out[col].value_counts()
-                    if isinstance(df_out, dd.DataFrame):
-                        freq = freq.compute()
-                        df_out[new_col] = df_out[col].map(freq, meta=(new_col, 'int64'))
-                    else:
-                        df_out[new_col] = df_out[col].map(freq)
-                    new_features.append(new_col)
-                    feature_count += 1
+                    
+                    try:
+                        # Frequency encoding
+                        new_col = f"freq_{col}"
+                        if isinstance(df_out, dd.DataFrame):
+                            freq_map = df_out[col].value_counts().compute().to_dict()
+                            df_out[new_col] = df_out[col].map(freq_map, meta=(new_col, 'int64'))
+                        else:
+                            freq_map = df_out[col].value_counts().to_dict()
+                            df_out[new_col] = df_out[col].map(freq_map)
+                        new_features.append(new_col)
+                        feature_count += 1
+                        
+                    except Exception as e:
+                        logger.warning(f"Error creating frequency encoding for {col}: {str(e)}")
             
+            # 3. Datetime feature engineering
             datetime_cols = analysis['datetime_cols']
-            if datetime_cols:
-                valid_features = ["year", "month", "dayofweek"]
-                for col in datetime_cols[:min(3, len(datetime_cols))]:
+            if datetime_cols and feature_count < max_features:
+                datetime_features = ["year", "month", "dayofweek", "hour"]
+                for col in datetime_cols[:min(2, len(datetime_cols))]:
                     if feature_count >= max_features:
                         break
-                    for feature in valid_features:
+                    
+                    for feature in datetime_features:
                         if feature_count >= max_features:
                             break
-                        new_col = f"{col}_{feature}"
-                        if isinstance(df_out, dd.DataFrame):
-                            df_out[new_col] = getattr(df_out[col].dt, feature)
-                        else:
-                            df_out[new_col] = getattr(df_out[col].dt, feature)
-                        new_features.append(new_col)
-                        feature_count += 1
+                        
+                        try:
+                            new_col = f"{col}_{feature}"
+                            if isinstance(df_out, dd.DataFrame):
+                                df_out[new_col] = getattr(df_out[col].dt, feature)
+                            else:
+                                df_out[new_col] = getattr(df_out[col].dt, feature)
+                            new_features.append(new_col)
+                            feature_count += 1
+                            
+                        except Exception as e:
+                            logger.warning(f"Error creating datetime feature {new_col}: {str(e)}")
             
+            # 4. Text feature engineering
             text_cols = analysis['text_cols']
-            if text_cols:
-                for col in text_cols[:min(3, len(text_cols))]:
+            if text_cols and feature_count < max_features:
+                for col in text_cols[:min(2, len(text_cols))]:
                     if feature_count >= max_features:
                         break
-                    new_col = f"len_{col}"
-                    if isinstance(df_out, dd.DataFrame):
-                        df_out[new_col] = df_out[col].map_partitions(
-                            lambda s: s.str.len(), meta=(new_col, 'int64')
-                        )
-                    else:
-                        df_out[new_col] = df_out[col].str.len()
-                    new_features.append(new_col)
-                    feature_count += 1
+                    
+                    try:
+                        # Text length
+                        new_col = f"len_{col}"
+                        if isinstance(df_out, dd.DataFrame):
+                            df_out[new_col] = df_out[col].map_partitions(
+                                lambda s: s.astype(str).str.len(), 
+                                meta=(new_col, 'int64')
+                            )
+                        else:
+                            df_out[new_col] = df_out[col].astype(str).str.len()
+                        new_features.append(new_col)
+                        feature_count += 1
+                        
+                    except Exception as e:
+                        logger.warning(f"Error creating text feature for {col}: {str(e)}")
             
-            if categorical_cols and numeric_cols:
+            # 5. Cross-feature engineering (categorical-numeric interactions)
+            if categorical_cols and numeric_cols and feature_count < max_features:
                 for cat_col in categorical_cols[:min(2, len(categorical_cols))]:
                     if feature_count >= max_features:
                         break
                     for num_col in numeric_cols[:min(2, len(numeric_cols))]:
                         if feature_count >= max_features:
                             break
-                        new_col = f"mean_{num_col}_by_{cat_col}"
-                        if isinstance(df_out, dd.DataFrame):
-                            grouped = df_out.groupby(cat_col)[num_col].mean().compute()
-                            df_out[new_col] = df_out[cat_col].map(grouped, meta=(new_col, 'float64'))
-                        else:
-                            grouped = df_out.groupby(cat_col)[num_col].mean()
-                            df_out[new_col] = df_out[cat_col].map(grouped)
-                        new_features.append(new_col)
-                        feature_count += 1
+                        
+                        try:
+                            # Mean encoding
+                            new_col = f"mean_{num_col}_by_{cat_col}"
+                            if isinstance(df_out, dd.DataFrame):
+                                grouped_mean = df_out.groupby(cat_col)[num_col].mean().compute()
+                                df_out[new_col] = df_out[cat_col].map(grouped_mean, meta=(new_col, 'float64'))
+                            else:
+                                grouped_mean = df_out.groupby(cat_col)[num_col].mean()
+                                df_out[new_col] = df_out[cat_col].map(grouped_mean)
+                            new_features.append(new_col)
+                            feature_count += 1
+                            
+                        except Exception as e:
+                            logger.warning(f"Error creating cross-feature {new_col}: {str(e)}")
             
+            # 6. Feature selection based on variance
             if new_features and not preview:
-                variances = {}
-                for col in new_features:
-                    var = df_out[col].var()
-                    if isinstance(df_out, dd.DataFrame):
-                        var = var.compute()
-                    variances[col] = var if not pd.isna(var) else 0
-                new_features = sorted(variances, key=variances.get, reverse=True)[:min(max_features, len(new_features))]
-                low_var_cols = [col for col in df_out.columns if col in new_features and variances[col] < 1e-6]
-                df_out = df_out.drop(columns=low_var_cols)
-                new_features = [col for col in new_features if col not in low_var_cols]
+                try:
+                    # Remove low-variance features
+                    low_var_features = []
+                    for col in new_features:
+                        if col in df_out.columns:
+                            col_var = df_out[col].var()
+                            if isinstance(df_out, dd.DataFrame):
+                                col_var = col_var.compute()
+                            if pd.isna(col_var) or col_var < 1e-8:
+                                low_var_features.append(col)
+                    
+                    if low_var_features:
+                        df_out = df_out.drop(columns=low_var_features)
+                        new_features = [col for col in new_features if col not in low_var_features]
+                        
+                except Exception as e:
+                    logger.warning(f"Error in feature selection: {str(e)}")
         
-        msg = f"Generated {len(new_features)} features: {', '.join(new_features) if new_features else 'None'}"
+        msg = f"Generated {len(new_features)} features"
+        if new_features:
+            msg += f": {', '.join(new_features[:10])}"  # Show first 10 features
+            if len(new_features) > 10:
+                msg += f" and {len(new_features) - 10} more"
+        
         logger.info(msg)
+        
         if not preview:
             with session_lock:
-                st.session_state.pipeline.append({"kind": "automated_feature_engineering", "params": {"max_features": max_features, "features": new_features}})
+                if 'pipeline' not in st.session_state:
+                    st.session_state.pipeline = []
+                st.session_state.pipeline.append({
+                    "kind": "automated_feature_engineering", 
+                    "params": {"max_features": max_features, "features": new_features}
+                })
+        
         return df_out, msg
+        
     except ValueError as e:
         logger.error(f"ValueError in automated_feature_engineering: {str(e)}")
         return df, f"Error in automated feature engineering: {str(e)}"
     except MemoryError:
-        logger.error("MemoryError in automated_feature_engineering: Dataset too large")
+        logger.error("MemoryError in automated_feature_engineering")
         return df, "Error: Dataset too large for automated feature engineering"
     except Exception as e:
         logger.error(f"Unexpected error in automated_feature_engineering: {str(e)}")
         return df, f"Unexpected error: {str(e)}"
 
-def plot_correlation_heatmap(df: pd.DataFrame | dd.DataFrame, columns: List[str] = None, threshold: float = 0.5):
+def plot_correlation_heatmap(df: Union[pd.DataFrame, dd.DataFrame], columns: Optional[List[str]] = None, threshold: float = 0.5):
     """Plot a correlation heatmap for selected numeric columns."""
     try:
+        if df is None or df.empty:
+            st.warning("No data available for correlation heatmap")
+            return
+            
         num_cols, _ = dtype_split(df)
         if not num_cols:
             st.warning("No numeric columns available for correlation heatmap")
             return
         
+        # Filter columns if specified
         if columns:
             num_cols = [col for col in columns if col in num_cols]
+        
+        # Limit to reasonable number of columns for visualization
         num_cols = num_cols[:20]
         
         if not num_cols:
@@ -547,394 +885,605 @@ def plot_correlation_heatmap(df: pd.DataFrame | dd.DataFrame, columns: List[str]
             return
         
         with st.spinner("Computing correlation heatmap..."):
-            if isinstance(df, dd.DataFrame):
-                corr_matrix = df[num_cols].corr().compute()
-            else:
-                corr_matrix = df[num_cols].corr()
-            
-            corr_matrix = corr_matrix.fillna(0)
-            
-            chart = alt.Chart(corr_matrix.reset_index().melt(id_vars=['index'])).mark_rect().encode(
-                x=alt.X('index:O', title=''),
-                y=alt.Y('variable:O', title=''),
-                color=alt.Color('value:Q', scale=alt.Scale(scheme='redblue', domain=[-1, 1])),
-                tooltip=['index', 'variable', 'value'],
-                opacity=alt.condition(
-                    alt.datum.value >= threshold,
-                    alt.value(1),
-                    alt.value(0.3)
+            try:
+                # Sample data if too large
+                if isinstance(df, dd.DataFrame):
+                    df_sample = sample_for_preview(df[num_cols], n=10000)
+                else:
+                    df_sample = df[num_cols] if len(df) <= 10000 else sample_for_preview(df[num_cols], n=10000)
+                
+                if df_sample.empty:
+                    st.warning("No data available after sampling")
+                    return
+                
+                # Compute correlation matrix
+                corr_matrix = df_sample.corr()
+                corr_matrix = corr_matrix.fillna(0)
+                
+                # Prepare data for Altair
+                corr_data = corr_matrix.reset_index().melt(id_vars=['index'])
+                corr_data.columns = ['var1', 'var2', 'correlation']
+                
+                # Add absolute correlation for filtering
+                corr_data['abs_correlation'] = corr_data['correlation'].abs()
+                
+                # Create base chart
+                base = alt.Chart(corr_data)
+                
+                # Create heatmap with conditional opacity
+                heatmap = base.mark_rect().encode(
+                    x=alt.X('var1:O', title='', axis=alt.Axis(labelAngle=-45)),
+                    y=alt.Y('var2:O', title=''),
+                    color=alt.Color(
+                        'correlation:Q', 
+                        scale=alt.Scale(scheme='redblue', domain=[-1, 1]),
+                        title='Correlation'
+                    ),
+                    opacity=alt.condition(
+                        alt.datum.abs_correlation >= threshold,
+                        alt.value(1.0),
+                        alt.value(0.3)
+                    ),
+                    tooltip=[
+                        alt.Tooltip('var1:O', title='Variable 1'),
+                        alt.Tooltip('var2:O', title='Variable 2'),
+                        alt.Tooltip('correlation:Q', format='.3f', title='Correlation')
+                    ]
+                ).properties(
+                    title=f'Correlation Heatmap (Highlighted: |Correlation| >= {threshold})',
+                    width=min(600, 60 * len(num_cols)),
+                    height=min(600, 60 * len(num_cols))
                 )
-            ).properties(
-                title='Correlation Heatmap (Highlighted: |Correlation| >= Threshold)',
-                width=400,
-                height=400
-            )
-            st.altair_chart(chart, use_container_width=True)
-            
-            buffer = io.StringIO()
-            corr_matrix.to_csv(buffer)
-            buffer.seek(0)
-            st.download_button(
-                label="Download Correlation Matrix",
-                data=buffer.getvalue().encode('utf-8'),
-                file_name=f"correlation_matrix_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                mime="text/csv"
-            )
-    except ValueError as e:
-        logger.error(f"ValueError in plot_correlation_heatmap: {str(e)}")
-        st.error(f"Error plotting correlation heatmap: {str(e)}")
-    except MemoryError:
-        logger.error("MemoryError in plot_correlation_heatmap: Dataset too large")
-        st.error("Error: Dataset too large for correlation heatmap")
+                
+                st.altair_chart(heatmap, use_container_width=True)
+                
+                # Show summary statistics
+                high_corr_pairs = corr_data[corr_data['abs_correlation'] >= threshold]
+                high_corr_pairs = high_corr_pairs[high_corr_pairs['var1'] != high_corr_pairs['var2']]  # Remove self-correlations
+                
+                if not high_corr_pairs.empty:
+                    st.write(f"**High correlation pairs (|r| >= {threshold}):**")
+                    summary_df = high_corr_pairs[['var1', 'var2', 'correlation']].sort_values('correlation', key=abs, ascending=False)
+                    st.dataframe(summary_df.head(10), hide_index=True)
+                else:
+                    st.info(f"No correlation pairs found above threshold {threshold}")
+                
+                # Provide download option
+                csv_buffer = io.StringIO()
+                corr_matrix.to_csv(csv_buffer)
+                csv_data = csv_buffer.getvalue()
+                
+                st.download_button(
+                    label="📥 Download Correlation Matrix",
+                    data=csv_data,
+                    file_name=f"correlation_matrix_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                    mime="text/csv"
+                )
+                
+            except Exception as e:
+                logger.error(f"Error creating correlation heatmap: {str(e)}")
+                st.error(f"Error creating correlation heatmap: {str(e)}")
+                
     except Exception as e:
-        logger.error(f"Unexpected error in plot_correlation_heatmap: {str(e)}")
-        st.error(f"Unexpected error: {str(e)}")
+        logger.error(f"Error in plot_correlation_heatmap: {str(e)}")
+        st.error(f"Error plotting correlation heatmap: {str(e)}")
 
-def safe_eval_expression(df: pd.DataFrame | dd.DataFrame, expression: str, new_col: str) -> Tuple[pd.Series, str]:
-    """Safely evaluate a custom expression using numexpr."""
+def safe_eval_expression(df: Union[pd.DataFrame, dd.DataFrame], expression: str, new_col: str) -> Tuple[Optional[pd.Series], str]:
+    """Safely evaluate a custom expression using pandas eval."""
     try:
+        if not expression or not expression.strip():
+            return None, "Expression cannot be empty"
+        
+        # Sanitize expression - remove potentially dangerous operations
+        dangerous_keywords = ['import', 'exec', 'eval', 'open', 'file', '__', 'getattr', 'setattr', 'delattr']
+        expression_lower = expression.lower()
+        for keyword in dangerous_keywords:
+            if keyword in expression_lower:
+                return None, f"Expression contains forbidden keyword: {keyword}"
+        
+        # Check if expression references valid columns
         valid_cols = [col for col in df.columns if col in expression]
         if not valid_cols:
             return None, "Expression must reference valid column names"
         
-        allowed_ops = {'+', '-', '*', '/', 'log', 'exp', 'sin', 'cos', 'sqrt'}
-        if not any(op in expression for op in allowed_ops):
-            return None, "Expression must include at least one valid operation (+, -, *, /, log, exp, sin, cos, sqrt)"
+        # Check for allowed operations
+        allowed_ops = {'+', '-', '*', '/', '(', ')', 'log', 'exp', 'sin', 'cos', 'sqrt', 'abs'}
+        # Simple check for mathematical operations
+        has_valid_op = any(op in expression for op in ['+', '-', '*', '/'])
+        if not has_valid_op:
+            return None, "Expression must include at least one mathematical operation (+, -, *, /)"
         
+        # Evaluate expression safely
         if isinstance(df, dd.DataFrame):
-            result = df.compute().eval(expression, engine='numexpr')
+            # For Dask, compute a sample first to test
+            df_sample = sample_for_preview(df, n=1000)
+            result_sample = df_sample.eval(expression, engine='python')  # Use python engine for safety
+            if len(result_sample) > 0:  # If sample works, apply to full dataset
+                result = df.map_partitions(lambda x: x.eval(expression, engine='python'), meta=('result', 'float64'))
+                return result, "Expression evaluated successfully"
+            else:
+                return None, "Expression evaluation failed on sample"
         else:
-            result = df.eval(expression, engine='numexpr')
-        return result, "Expression evaluated successfully"
+            result = df.eval(expression, engine='python')  # Use python engine for safety
+            return result, "Expression evaluated successfully"
+            
+    except SyntaxError as e:
+        return None, f"Syntax error in expression: {str(e)}"
+    except KeyError as e:
+        return None, f"Column not found: {str(e)}"
     except Exception as e:
         return None, f"Error evaluating expression: {str(e)}"
 
-def export_dataframe(df: pd.DataFrame | dd.DataFrame, columns: List[str]) -> Tuple[bytes, str]:
+def export_dataframe(df: Union[pd.DataFrame, dd.DataFrame], columns: List[str]) -> Tuple[Optional[bytes], str]:
     """Export selected columns of the DataFrame as a CSV file."""
     try:
-        columns = [c for c in columns if c in df.columns]
-        if not columns:
+        if df is None or df.empty:
+            return None, "DataFrame is empty"
+            
+        # Validate columns
+        valid_columns = [c for c in columns if c in df.columns]
+        if not valid_columns:
             return None, "No valid columns selected for export"
         
         with st.spinner("Exporting DataFrame..."):
-            if isinstance(df, dd.DataFrame):
-                df_export = df[columns].compute()
-            else:
-                df_export = df[columns]
-            
-            buffer = io.StringIO()
-            df_export.to_csv(buffer, index=True)
-            buffer.seek(0)
-            return buffer.getvalue().encode('utf-8'), f"Exported {len(columns)} columns as CSV"
-    except ValueError as e:
-        logger.error(f"ValueError in export_dataframe: {str(e)}")
+            try:
+                if isinstance(df, dd.DataFrame):
+                    df_export = df[valid_columns].compute()
+                else:
+                    df_export = df[valid_columns]
+                
+                # Create CSV buffer
+                csv_buffer = io.StringIO()
+                df_export.to_csv(csv_buffer, index=True)
+                csv_data = csv_buffer.getvalue().encode('utf-8')
+                
+                return csv_data, f"Exported {len(valid_columns)} columns ({len(df_export)} rows) as CSV"
+                
+            except MemoryError:
+                return None, "Dataset too large for export. Try selecting fewer columns."
+                
+    except Exception as e:
+        logger.error(f"Error in export_dataframe: {str(e)}")
         return None, f"Error exporting DataFrame: {str(e)}"
-    except MemoryError:
-        logger.error("MemoryError in export_dataframe: Dataset too large")
-        return None, "Error: Dataset too large for export"
-    except Exception as e:
-        logger.error(f"Unexpected error in export_dataframe: {str(e)}")
-        return None, f"Unexpected error: {str(e)}"
-
-def compute_feature_stats(df: pd.DataFrame | dd.DataFrame, target_col: str = None) -> pd.DataFrame:
-    """Compute detailed statistics for each feature."""
-    try:
-        if not df.columns:
-            return pd.DataFrame()
-        
-        stats = []
-        for col in df.columns:
-            unique_count = df[col].nunique()
-            missing_rate = df[col].isna().mean()
-            variance = df[col].var() if is_numeric_dtype(df[col]) else None
-            
-            if isinstance(df, dd.DataFrame):
-                unique_count = unique_count.compute()
-                missing_rate = missing_rate.compute()
-                if variance is not None:
-                    variance = variance.compute()
-            
-            stat = {
-                'Feature': col,
-                'Type': ('numeric' if is_numeric_dtype(df[col]) else 
-                        'datetime' if is_datetime64_any_dtype(df[col]) else 
-                        'categorical' if is_string_dtype(df[col]) and unique_count < (len(df.compute()) if isinstance(df, dd.DataFrame) else len(df)) * 0.5 else 
-                        'text'),
-                'Unique Count': unique_count,
-                'Missing Rate': missing_rate,
-                'Variance': variance
-            }
-            stats.append(stat)
-        
-        stats_df = pd.DataFrame(stats)
-        
-        if target_col and target_col in df.columns:
-            if isinstance(df, dd.DataFrame):
-                df_sample = sample_for_preview(df, n=10000)
-            else:
-                df_sample = df
-            num_cols = [col for col in df_sample.columns if is_numeric_dtype(df_sample[col]) and col != target_col]
-            if num_cols and is_numeric_dtype(df_sample[target_col]):
-                X = df_sample[num_cols].fillna(0)
-                y = df_sample[target_col].fillna(0)
-                mi_scores = mutual_info_regression(X, y)
-                mi_dict = dict(zip(num_cols, mi_scores))
-                stats_df['Mutual Information'] = stats_df['Feature'].map(lambda x: mi_dict.get(x, None))
-        
-        return stats_df
-    except Exception as e:
-        logger.error(f"Error in compute_feature_stats: {str(e)}")
-        return pd.DataFrame()
 
 def section_feature_engineering():
     """Feature Engineering section with sub-tabs for different operations."""
-    if st.session_state.get('df') is None:
-        st.warning("Please upload a dataset in the Upload section first.")
-        return
-    
-    with session_lock:
-        if 'pipeline' not in st.session_state:
-            st.session_state.pipeline = []
-        if 'history' not in st.session_state:
-            st.session_state.history = []
-    
-    st.header("🎨 Feature Engineering Studio")
-    st.markdown("Create, transform, and select features to uncover hidden patterns in your data.")
-    
-    tabs = st.tabs([
-        "🖌️ Feature Creation",
-        "🔮 Feature Transformation",
-        "✂️ Feature Selection",
-        "🤖 Automated Feature Engineering",
-        "🧭 Feature Evaluation"
-    ])
-    
-    df = st.session_state.df
-    before_stats = compute_basic_stats(df)
-    
-    with tabs[0]:
-        st.subheader("🖌️ Feature Creation")
-        st.markdown("Generate new features from existing data.", help="Create new features like polynomial or datetime-based features to enhance your dataset.")
+    try:
+        # Check if data is available
+        if 'df' not in st.session_state or st.session_state.df is None:
+            st.warning("⚠️ Please upload a dataset in the Upload section first.")
+            return
         
-        col1, col2 = st.columns(2)
-        with col1:
-            st.markdown("**Polynomial Features**")
-            poly_cols = st.multiselect("Select numeric columns for polynomial features", 
-                                     [c for c in df.columns if is_numeric_dtype(df[c])], 
-                                     key="poly_cols")
-            poly_degree = st.slider("Polynomial degree", 1, 5, 2, key="poly_degree")
-            if st.button("Apply Polynomial Features"):
-                with st.spinner("Applying polynomial features..."):
-                    preview_df, preview_msg = create_polynomial_features(df, poly_cols, poly_degree, preview=True)
-                    if "Error" not in preview_msg:
-                        st.write("Preview of transformed DataFrame:")
-                        st.write(sample_for_preview(preview_df))
-                        if st.button("Confirm Polynomial Features"):
-                            df, msg = create_polynomial_features(df, poly_cols, poly_degree)
-                            if "Error" not in msg:
-                                with session_lock:
-                                    st.session_state.df = df
-                                    push_history(f"Applied polynomial features (degree={poly_degree})")
-                                st.success(msg)
-                            else:
-                                st.error(msg)
-                    else:
-                        st.error(preview_msg)
+        # Initialize session state variables
+        with session_lock:
+            if 'pipeline' not in st.session_state:
+                st.session_state.pipeline = []
+            if 'history' not in st.session_state:
+                st.session_state.history = []
         
-        with col2:
-            st.markdown("**Datetime Features**")
-            dt_cols = st.multiselect("Select datetime columns", df.columns, key="dt_cols")
-            dt_features = st.multiselect("Select features to extract", 
-                                      ["year", "month", "day", "hour", "minute", "second", "dayofweek", "quarter"], 
-                                      key="dt_features")
-            if st.button("Extract Datetime Features"):
-                with st.spinner("Extracting datetime features..."):
-                    preview_df, preview_msg = extract_datetime_features(df, dt_cols, dt_features, preview=True)
-                    if "Error" not in preview_msg:
-                        st.write("Preview of transformed DataFrame:")
-                        st.write(sample_for_preview(preview_df))
-                        if st.button("Confirm Datetime Features"):
-                            df, msg = extract_datetime_features(df, dt_cols, dt_features)
-                            if "Error" not in msg:
-                                with session_lock:
-                                    st.session_state.df = df
-                                    push_history(f"Extracted datetime features: {', '.join(dt_features)}")
-                                st.success(msg)
-                            else:
-                                st.error(msg)
-                    else:
-                        st.error(preview_msg)
-    
-    with tabs[1]:
-        st.subheader("🔮 Feature Transformation")
-        st.markdown("Transform features to enhance model performance.", help="Transform existing features, e.g., by binning numeric columns.")
+        st.header("🎨 Feature Engineering Studio")
+        st.markdown("Create, transform, and select features to uncover hidden patterns in your data.")
         
-        st.markdown("**Binning**")
-        bin_cols = st.multiselect("Select numeric columns to bin", 
-                                [c for c in df.columns if is_numeric_dtype(df[c])], 
-                                key="bin_cols")
-        bins = st.slider("Number of bins", 2, 50, 10, key="bins")
-        if st.button("Apply Binning"):
-            with st.spinner("Applying binning..."):
-                preview_df, preview_msg = bin_features(df, bin_cols, bins, preview=True)
-                if "Error" not in preview_msg:
-                    st.write("Preview of transformed DataFrame:")
-                    st.write(sample_for_preview(preview_df))
-                    if st.button("Confirm Binning"):
-                        df, msg = bin_features(df, bin_cols, bins)
-                        if "Error" not in msg:
-                            with session_lock:
-                                st.session_state.df = df
-                                push_history(f"Binned columns into {bins} bins")
-                            st.success(msg)
-                        else:
-                            st.error(msg)
+        # Create tabs
+        tabs = st.tabs([
+            "🖌️ Feature Creation",
+            "🔮 Feature Transformation", 
+            "✂️ Feature Selection",
+            "🤖 Automated Feature Engineering",
+            "🧭 Feature Evaluation"
+        ])
+        
+        df = st.session_state.df
+        before_stats = compute_basic_stats(df)
+        
+        # Tab 1: Feature Creation
+        with tabs[0]:
+            st.subheader("🖌️ Feature Creation")
+            st.markdown("Generate new features from existing data.")
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.markdown("**Polynomial Features**")
+                numeric_cols = [c for c in df.columns if is_numeric_dtype(df[c])]
+                
+                if not numeric_cols:
+                    st.info("No numeric columns available for polynomial features.")
                 else:
-                    st.error(preview_msg)
-    
-    with tabs[2]:
-        st.subheader("✂️ Feature Selection")
-        st.markdown("Select the most relevant features to reduce dimensionality.", help="Remove redundant or highly correlated features.")
+                    poly_cols = st.multiselect(
+                        "Select numeric columns for polynomial features", 
+                        numeric_cols, 
+                        key="poly_cols",
+                        help="Select columns to create polynomial and interaction features"
+                    )
+                    poly_degree = st.slider("Polynomial degree", 1, 5, 2, key="poly_degree")
+                    
+                    if st.button("🔍 Preview Polynomial Features", key="preview_poly"):
+                        if poly_cols:
+                            with st.spinner("Generating preview..."):
+                                preview_df, preview_msg = create_polynomial_features(df, poly_cols, poly_degree, preview=True)
+                                if "Error" not in preview_msg:
+                                    st.success(preview_msg)
+                                    st.write("**Preview of new features:**")
+                                    preview_sample = sample_for_preview(preview_df)
+                                    new_cols = [col for col in preview_sample.columns if col not in df.columns]
+                                    if new_cols:
+                                        st.dataframe(preview_sample[new_cols].head())
+                                    
+                                    if st.button("✅ Apply Polynomial Features", key="apply_poly"):
+                                        df_new, msg = create_polynomial_features(df, poly_cols, poly_degree)
+                                        if "Error" not in msg:
+                                            with session_lock:
+                                                st.session_state.df = df_new
+                                            push_history(f"Applied polynomial features (degree={poly_degree})")
+                                            st.success("✅ " + msg)
+                                            st.experimental_rerun()
+                                        else:
+                                            st.error("❌ " + msg)
+                                else:
+                                    st.error("❌ " + preview_msg)
+                        else:
+                            st.warning("Please select at least one column.")
+            
+            with col2:
+                st.markdown("**Datetime Features**")
+                all_cols = list(df.columns)
+                
+                if not all_cols:
+                    st.info("No columns available for datetime features.")
+                else:
+                    dt_cols = st.multiselect(
+                        "Select datetime columns", 
+                        all_cols, 
+                        key="dt_cols",
+                        help="Select columns containing datetime data"
+                    )
+                    dt_features = st.multiselect(
+                        "Select features to extract", 
+                        ["year", "month", "day", "hour", "minute", "second", "dayofweek", "quarter"], 
+                        default=["year", "month", "day"],
+                        key="dt_features"
+                    )
+                    
+                    if st.button("🔍 Preview Datetime Features", key="preview_dt"):
+                        if dt_cols and dt_features:
+                            with st.spinner("Generating preview..."):
+                                preview_df, preview_msg = extract_datetime_features(df, dt_cols, dt_features, preview=True)
+                                if "Error" not in preview_msg:
+                                    st.success(preview_msg)
+                                    st.write("**Preview of new features:**")
+                                    preview_sample = sample_for_preview(preview_df)
+                                    new_cols = [col for col in preview_sample.columns if col not in df.columns]
+                                    if new_cols:
+                                        st.dataframe(preview_sample[new_cols].head())
+                                    
+                                    if st.button("✅ Apply Datetime Features", key="apply_dt"):
+                                        df_new, msg = extract_datetime_features(df, dt_cols, dt_features)
+                                        if "Error" not in msg:
+                                            with session_lock:
+                                                st.session_state.df = df_new
+                                            push_history(f"Extracted datetime features: {', '.join(dt_features)}")
+                                            st.success("✅ " + msg)
+                                            st.experimental_rerun()
+                                        else:
+                                            st.error("❌ " + msg)
+                                else:
+                                    st.error("❌ " + preview_msg)
+                        else:
+                            st.warning("Please select columns and features.")
         
-        st.markdown("**Correlation-based Selection**")
-        corr_threshold = st.slider("Correlation threshold", 0.1, 0.9, 0.8, step=0.05, key="corr_threshold")
-        if st.button("Apply Correlation-based Selection"):
-            with st.spinner("Applying correlation-based selection..."):
-                preview_df, preview_msg = select_features_correlation(df, corr_threshold, preview=True)
-                if "Error" not in preview_msg:
-                    st.write("Preview of transformed DataFrame:")
-                    st.write(sample_for_preview(preview_df))
-                    if st.button("Confirm Correlation Selection"):
-                        df, msg = select_features_correlation(df, corr_threshold)
-                        if "Error" not in msg:
-                            with session_lock:
-                                st.session_state.df = df
+        # Tab 2: Feature Transformation
+        with tabs[1]:
+            st.subheader("🔮 Feature Transformation")
+            st.markdown("Transform features to enhance model performance.")
+            
+            st.markdown("**Binning**")
+            numeric_cols = [c for c in df.columns if is_numeric_dtype(df[c])]
+            
+            if not numeric_cols:
+                st.info("No numeric columns available for binning.")
+            else:
+                bin_cols = st.multiselect(
+                    "Select numeric columns to bin", 
+                    numeric_cols, 
+                    key="bin_cols",
+                    help="Convert continuous variables into discrete bins"
+                )
+                bins = st.slider("Number of bins", 2, 50, 10, key="bins")
+                
+                if st.button("🔍 Preview Binning", key="preview_bin"):
+                    if bin_cols:
+                        with st.spinner("Generating preview..."):
+                            preview_df, preview_msg = bin_features(df, bin_cols, bins, preview=True)
+                            if "Error" not in preview_msg:
+                                st.success(preview_msg)
+                                st.write("**Preview of binned features:**")
+                                preview_sample = sample_for_preview(preview_df)
+                                new_cols = [col for col in preview_sample.columns if col not in df.columns]
+                                if new_cols:
+                                    st.dataframe(preview_sample[new_cols].head())
+                                
+                                if st.button("✅ Apply Binning", key="apply_bin"):
+                                    df_new, msg = bin_features(df, bin_cols, bins)
+                                    if "Error" not in msg:
+                                        with session_lock:
+                                            st.session_state.df = df_new
+                                        push_history(f"Binned columns into {bins} bins")
+                                        st.success("✅ " + msg)
+                                        st.experimental_rerun()
+                                    else:
+                                        st.error("❌ " + msg)
+                            else:
+                                st.error("❌ " + preview_msg)
+                    else:
+                        st.warning("Please select at least one column.")
+        
+        # Tab 3: Feature Selection
+        with tabs[2]:
+            st.subheader("✂️ Feature Selection")
+            st.markdown("Select the most relevant features to reduce dimensionality.")
+            
+            st.markdown("**Correlation-based Selection**")
+            corr_threshold = st.slider(
+                "Correlation threshold", 
+                0.1, 0.99, 0.8, 
+                step=0.05, 
+                key="corr_threshold",
+                help="Remove features with correlation above this threshold"
+            )
+            
+            if st.button("🔍 Preview Correlation Selection", key="preview_corr"):
+                with st.spinner("Analyzing correlations..."):
+                    preview_df, preview_msg = select_features_correlation(df, corr_threshold, preview=True)
+                    if "Error" not in preview_msg:
+                        st.success(preview_msg)
+                        before_cols = set(df.columns)
+                        after_cols = set(preview_df.columns)
+                        removed_cols = before_cols - after_cols
+                        
+                        if removed_cols:
+                            st.write(f"**Columns to be removed ({len(removed_cols)}):**")
+                            st.write(", ".join(sorted(removed_cols)))
+                        else:
+                            st.info("No columns will be removed with this threshold.")
+                        
+                        if st.button("✅ Apply Correlation Selection", key="apply_corr"):
+                            df_new, msg = select_features_correlation(df, corr_threshold)
+                            if "Error" not in msg:
+                                with session_lock:
+                                    st.session_state.df = df_new
                                 push_history(f"Selected features based on correlation (threshold={corr_threshold})")
-                            st.success(msg)
-                        else:
-                            st.error(msg)
-                else:
-                    st.error(preview_msg)
-    
-    with tabs[3]:
-        st.subheader("🤖 Automated Feature Engineering")
-        st.markdown("Generate candidate features automatically based on dataset analysis.", help="Automatically create features based on data type and relationships.")
+                                st.success("✅ " + msg)
+                                st.experimental_rerun()
+                            else:
+                                st.error("❌ " + msg)
+                    else:
+                        st.error("❌ " + preview_msg)
         
-        max_features = st.slider("Maximum number of features to generate", 1, 200, 50, key="max_features")
-        target_col = st.selectbox("Select target column (optional, for supervised feature selection)", [None] + list(df.columns), key="target_col")
-        if st.button("Generate Automated Features"):
-            with st.spinner("Generating automated features..."):
-                preview_df, preview_msg = automated_feature_engineering(df, max_features, preview=True, target_col=target_col)
-                if "Error" not in preview_msg:
-                    st.write("Preview of transformed DataFrame:")
-                    st.write(sample_for_preview(preview_df))
-                    if st.button("Confirm Automated Features"):
-                        df, msg = automated_feature_engineering(df, max_features, target_col=target_col)
-                        if "Error" not in msg:
-                            with session_lock:
-                                st.session_state.df = df
-                                push_history(f"Generated {max_features} automated features")
-                                st.session_state.target_col = target_col  # Store target_col for Feature Evaluation
-                            st.success(msg)
-                        else:
-                            st.error(msg)
-                else:
-                    st.error(preview_msg)
-    
-    with tabs[4]:
-        st.subheader("🧭 Feature Evaluation")
-        st.markdown("Evaluate feature importance and relationships to understand your dataset.", help="Analyze feature statistics, correlations, and pipeline history.")
-        
-        with st.expander("📊 Feature Palette Dashboard", expanded=True):
-            st.markdown("**Dataset Overview**")
-            after_stats = compute_basic_stats(st.session_state.df)
-            comparison = compare_stats(before_stats, after_stats)
+        # Tab 4: Automated Feature Engineering
+        with tabs[3]:
+            st.subheader("🤖 Automated Feature Engineering")
+            st.markdown("Generate candidate features automatically based on dataset analysis.")
             
             col1, col2 = st.columns(2)
             with col1:
-                st.metric("Features Before", comparison['n_columns_before'], delta=None)
-                st.metric("Features After", comparison['n_columns_after'], 
-                          delta=comparison['n_columns_after'] - comparison['n_columns_before'])
-            
+                max_features = st.slider(
+                    "Maximum number of features to generate", 
+                    1, 200, 50, 
+                    key="max_features",
+                    help="Limit the number of new features to prevent overfitting"
+                )
             with col2:
-                st.markdown("**Added Features**", help="New features created during engineering.")
-                st.markdown(f"*{', '.join(comparison['added_columns']) if comparison['added_columns'] else 'None'}*")
-                st.markdown("**Removed Features**", help="Features removed during selection.")
-                st.markdown(f"*{', '.join(comparison['removed_columns']) if comparison['removed_columns'] else 'None'}*")
+                target_col = st.selectbox(
+                    "Select target column (optional)", 
+                    [None] + list(df.columns), 
+                    key="target_col",
+                    help="Target column for supervised feature selection"
+                )
             
-            chart_data = pd.DataFrame({
-                'Stage': ['Before', 'After'],
-                'Feature Count': [comparison['n_columns_before'], comparison['n_columns_after']]
-            })
-            chart = alt.Chart(chart_data).mark_bar().encode(
-                x='Stage',
-                y='Feature Count',
-                color=alt.Color('Stage', scale=alt.Scale(range=['#1f77b4', '#ff7f0e'])),
-                tooltip=['Stage', 'Feature Count']
-            ).properties(
-                title='Feature Count Before and After Engineering',
-                width=500,
-                height=400
-            )
-            st.altair_chart(chart, use_container_width=True)
-            
-            st.markdown("**Pipeline History**")
-            if st.session_state.history:
-                history_df = pd.DataFrame(st.session_state.history)
-                st.dataframe(history_df[['timestamp', 'message']].sort_values('timestamp', ascending=False))
-            else:
-                st.info("No feature engineering steps applied yet.")
-                
-        with st.expander("🔗 Correlation Heatmap", expanded=True):
-            st.markdown("**Correlation Heatmap**", help="Visualize correlations between numeric features. Select columns and adjust the threshold to highlight strong relationships.")
-            corr_cols = st.multiselect("Select columns for correlation heatmap", 
-                                     [c for c in df.columns if is_numeric_dtype(df[c])], 
-                                     default=[c for c in df.columns if is_numeric_dtype(df[c])][:10],
-                                     key="corr_cols")
-            corr_threshold = st.slider("Highlight correlations above", 0.1, 0.9, 0.5, step=0.05, key="corr_heatmap_threshold")
-            plot_correlation_heatmap(st.session_state.df, columns=corr_cols, threshold=corr_threshold)
-        
-        with st.expander("✍️ Feature Sketchbook", expanded=False):
-            st.markdown("**Feature Sketchbook**", help="Test custom feature expressions using safe mathematical operations.")
-            expression = st.text_input("Enter custom feature expression (e.g., 'col1 / log(col2 + 1)')", key="feature_sketch")
-            if st.button("Test Feature Expression"):
-                with st.spinner("Evaluating expression..."):
-                    new_col = f"custom_feature_{uuid.uuid4().hex[:8]}"
-                    result, msg = safe_eval_expression(df, expression, new_col)
-                    if result is not None:
-                        st.write("Result preview:")
-                        st.write(result.head())
-                        if st.button("Add to Dataset"):
-                            with session_lock:
-                                st.session_state.df[new_col] = result
-                                push_history(f"Added custom feature: {expression}")
-                                st.success(f"Added custom feature as {new_col}")
+            if st.button("🔍 Preview Automated Features", key="preview_auto"):
+                with st.spinner("Analyzing dataset and generating features..."):
+                    preview_df, preview_msg = automated_feature_engineering(
+                        df, max_features, preview=True, target_col=target_col
+                    )
+                    if "Error" not in preview_msg:
+                        st.success(preview_msg)
+                        
+                        new_cols = [col for col in preview_df.columns if col not in df.columns]
+                        if new_cols:
+                            st.write(f"**New features generated ({len(new_cols)}):**")
+                            preview_sample = sample_for_preview(preview_df)
+                            st.dataframe(preview_sample[new_cols[:10]].head())  # Show first 10 features
+                            
+                            if len(new_cols) > 10:
+                                st.info(f"... and {len(new_cols) - 10} more features")
+                        
+                        if st.button("✅ Apply Automated Features", key="apply_auto"):
+                            df_new, msg = automated_feature_engineering(df, max_features, target_col=target_col)
+                            if "Error" not in msg:
+                                with session_lock:
+                                    st.session_state.df = df_new
+                                    if target_col:
+                                        st.session_state.target_col = target_col
+                                push_history(f"Generated automated features (max: {max_features})")
+                                st.success("✅ " + msg)
+                                st.experimental_rerun()
+                            else:
+                                st.error("❌ " + msg)
                     else:
-                        st.error(msg)
+                        st.error("❌ " + preview_msg)
         
-        with st.expander("💾 Export Features", expanded=False):
-            st.markdown("**Export Features**", help="Download the transformed dataset as a CSV file.")
-            export_cols = st.multiselect("Select columns to export", df.columns, default=df.columns.tolist(), key="export_cols")
-            if st.button("Preview Export"):
-                with st.spinner("Generating export preview..."):
-                    if export_cols:
-                        preview_df = sample_for_preview(df[export_cols])
-                        st.write("Preview of exported columns:")
-                        st.write(preview_df)
-                        if st.button("Download CSV"):
-                            csv_data, msg = export_dataframe(df, export_cols)
+        # Tab 5: Feature Evaluation
+        with tabs[4]:
+            st.subheader("🧭 Feature Evaluation")
+            st.markdown("Evaluate feature importance and relationships to understand your dataset.")
+            
+            # Dataset Overview
+            with st.expander("📊 Feature Dashboard", expanded=True):
+                st.markdown("**Dataset Overview**")
+                current_df = st.session_state.df
+                after_stats = compute_basic_stats(current_df)
+                comparison = compare_stats(before_stats, after_stats)
+                
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("Original Features", comparison['n_columns_before'])
+                with col2:
+                    st.metric("Current Features", comparison['n_columns_after'])
+                with col3:
+                    delta = comparison['n_columns_after'] - comparison['n_columns_before']
+                    st.metric("Net Change", delta, delta=delta)
+                
+                if comparison['added_columns']:
+                    st.success(f"**Added Features ({len(comparison['added_columns'])}):** {', '.join(comparison['added_columns'][:5])}")
+                    if len(comparison['added_columns']) > 5:
+                        st.info(f"... and {len(comparison['added_columns']) - 5} more")
+                
+                if comparison['removed_columns']:
+                    st.warning(f"**Removed Features ({len(comparison['removed_columns'])}):** {', '.join(comparison['removed_columns'][:5])}")
+                    if len(comparison['removed_columns']) > 5:
+                        st.info(f"... and {len(comparison['removed_columns']) - 5} more")
+                
+                # Feature count chart
+                if comparison['n_columns_before'] != comparison['n_columns_after']:
+                    chart_data = pd.DataFrame({
+                        'Stage': ['Before', 'After'],
+                        'Feature Count': [comparison['n_columns_before'], comparison['n_columns_after']]
+                    })
+                    chart = alt.Chart(chart_data).mark_bar(size=60).encode(
+                        x=alt.X('Stage:O', title=''),
+                        y=alt.Y('Feature Count:Q', title='Number of Features'),
+                        color=alt.Color('Stage:O', scale=alt.Scale(range=['#1f77b4', '#ff7f0e']), legend=None),
+                        tooltip=['Stage:O', 'Feature Count:Q']
+                    ).properties(
+                        title='Feature Count: Before vs After Engineering',
+                        width=300,
+                        height=200
+                    )
+                    st.altair_chart(chart, use_container_width=True)
+            
+            # Pipeline History
+            with st.expander("📋 Pipeline History", expanded=False):
+                if st.session_state.history:
+                    history_df = pd.DataFrame(st.session_state.history)
+                    history_df['timestamp'] = pd.to_datetime(history_df['timestamp'])
+                    history_df = history_df.sort_values('timestamp', ascending=False)
+                    st.dataframe(
+                        history_df[['timestamp', 'message']], 
+                        use_container_width=True,
+                        hide_index=True
+                    )
+                else:
+                    st.info("No feature engineering steps applied yet.")
+            
+            # Correlation Heatmap
+            with st.expander("🔗 Correlation Analysis", expanded=True):
+                numeric_cols = [c for c in current_df.columns if is_numeric_dtype(current_df[c])]
+                
+                if not numeric_cols:
+                    st.info("No numeric columns available for correlation analysis.")
+                else:
+                    corr_cols = st.multiselect(
+                        "Select columns for correlation heatmap", 
+                        numeric_cols, 
+                        default=numeric_cols[:min(10, len(numeric_cols))],
+                        key="corr_cols",
+                        help="Select up to 20 columns for correlation visualization"
+                    )
+                    corr_threshold_viz = st.slider(
+                        "Highlight correlations above", 
+                        0.1, 0.9, 0.5, 
+                        step=0.05, 
+                        key="corr_heatmap_threshold"
+                    )
+                    
+                    if corr_cols:
+                        plot_correlation_heatmap(current_df, columns=corr_cols, threshold=corr_threshold_viz)
+                    else:
+                        st.warning("Please select at least one column.")
+            
+            # Custom Feature Expression
+            with st.expander("✍️ Custom Feature Creator", expanded=False):
+                st.markdown("**Create custom features using mathematical expressions**")
+                st.info("Use column names and mathematical operators (+, -, *, /, log, exp, sin, cos, sqrt, abs)")
+                
+                expression = st.text_input(
+                    "Enter custom feature expression", 
+                    placeholder="e.g., col1 / (col2 + 1)",
+                    key="feature_expression",
+                    help="Example: log(column1) + sqrt(column2)"
+                )
+                
+                if st.button("🧪 Test Expression", key="test_expr"):
+                    if expression:
+                        with st.spinner("Testing expression..."):
+                            new_col = f"custom_feature_{uuid.uuid4().hex[:8]}"
+                            result, msg = safe_eval_expression(current_df, expression, new_col)
+                            if result is not None:
+                                st.success("✅ " + msg)
+                                st.write("**Preview of result:**")
+                                if isinstance(result, pd.Series):
+                                    preview_data = pd.DataFrame({
+                                        'Original Index': result.index[:10],
+                                        'Result': result.head(10)
+                                    })
+                                    st.dataframe(preview_data, hide_index=True)
+                                
+                                if st.button("➕ Add to Dataset", key="add_custom"):
+                                    try:
+                                        with session_lock:
+                                            st.session_state.df[new_col] = result
+                                        push_history(f"Added custom feature: {expression}")
+                                        st.success(f"✅ Added custom feature as {new_col}")
+                                        st.experimental_rerun()
+                                    except Exception as e:
+                                        st.error(f"❌ Error adding feature: {str(e)}")
+                            else:
+                                st.error("❌ " + msg)
+                    else:
+                        st.warning("Please enter an expression.")
+            
+            # Export Features
+            with st.expander("💾 Export Dataset", expanded=False):
+                st.markdown("**Download the transformed dataset**")
+                
+                export_cols = st.multiselect(
+                    "Select columns to export", 
+                    current_df.columns, 
+                    default=list(current_df.columns),
+                    key="export_cols",
+                    help="Choose which columns to include in the export"
+                )
+                
+                if export_cols:
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.metric("Selected Columns", len(export_cols))
+                    with col2:
+                        total_rows = len(current_df)
+                        if isinstance(current_df, dd.DataFrame):
+                            total_rows = total_rows.compute() if hasattr(total_rows, 'compute') else total_rows
+                        st.metric("Total Rows", total_rows)
+                    
+                    if st.button("📥 Download CSV", key="download_csv"):
+                        with st.spinner("Preparing download..."):
+                            csv_data, msg = export_dataframe(current_df, export_cols)
                             if csv_data:
                                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                                 st.download_button(
-                                    label="Download CSV File",
+                                    label="📁 Download CSV File",
                                     data=csv_data,
-                                    file_name=f"exported_features_{timestamp}.csv",
+                                    file_name=f"engineered_features_{timestamp}.csv",
                                     mime="text/csv"
                                 )
-                                st.success(msg)
+                                st.success("✅ " + msg)
                                 push_history(f"Exported {len(export_cols)} columns as CSV")
                             else:
-                                st.error(msg)
-                    else:
-                        st.error("Please select at least one column to export.")
-
+                                st.error("❌ " + msg)
+                else:
+                    st.warning("Please select at least one column to export.")
+    
+    except Exception as e:
+        logger.error(f"Error in section_feature_engineering: {str(e)}")
+        st.error(f"An unexpected error occurred: {str(e)}")
+        st.info("Please try refreshing the page or contact support if the issue persists.")
