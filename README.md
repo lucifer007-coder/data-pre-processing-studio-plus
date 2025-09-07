@@ -11,7 +11,6 @@
 - [Modules](#modules) 🧩
 - [Dependencies](#dependencies) 📦
 - [Configuration](#configuration) 🔧
-- [Contributing](#contributing) 🤝
 - [License](#license) 📜
 - [Contact](#contact) 📬
 
